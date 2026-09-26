@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/cron/ingest?group=daily&limit=250",
+      "schedule": "20 22 * * 1-5"
+    },
+    {
+      "path": "/api/cron/ingest?group=weekly&limit=250",
+      "schedule": "40 3 * * 6"
+    },
+    {
+      "path": "/api/cron/health",
+      "schedule": "5 * * * *"
+    }
+  ]
+}

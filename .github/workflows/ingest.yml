@@ -1,0 +1,90 @@
+name: nightly ingest
+
+# The real nightly pass. It runs here rather than on a serverless function
+# because a full 2,000-ticker financials + prices sweep makes thousands of
+# rate-limited vendor calls and takes far longer than any function timeout. A
+# CI runner has no wall-clock ceiling worth worrying about and costs nothing.
+#
+# The Vercel cron in vercel.json still exists, for two different jobs: bounded
+# top-up slices, and the hourly health watchdog that notices when THIS job
+# silently stops running.
+
+on:
+  schedule:
+    # 22:20 UTC on weekdays — after the US close (21:00 UTC), before the vendor's
+    # own nightly maintenance window.
+    - cron: '20 22 * * 1-5'
+    # Weekly universe + profile refresh, Saturday.
+    - cron: '40 3 * * 6'
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: 'Stage to run (or "all")'
+        default: all
+      symbols:
+        description: 'Comma-separated symbols, blank for the whole universe'
+        default: ''
+      provider:
+        description: 'fmp or fixture'
+        default: fmp
+
+concurrency:
+  # Two overlapping ingests would double every vendor call and race on the same
+  # rows. Stages are idempotent, but paying twice for the same data is not.
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+      FMP_REQUESTS_PER_SECOND: ${{ vars.FMP_REQUESTS_PER_SECOND || '4' }}
+      INGEST_EXCHANGES: ${{ vars.INGEST_EXCHANGES || 'NASDAQ,NYSE' }}
+      INGEST_YEARS: ${{ vars.INGEST_YEARS || '30' }}
+      INGEST_PRICE_LOOKBACK_DAYS: ${{ vars.INGEST_PRICE_LOOKBACK_DAYS || '7' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Weekly stages
+        if: github.event.schedule == '40 3 * * 6'
+        run: |
+          npm run ingest -- --stage=universe
+          npm run ingest -- --stage=profiles
+
+      - name: Daily stages
+        if: github.event.schedule == '20 22 * * 1-5'
+        run: |
+          npm run ingest -- --stage=financials
+          npm run ingest -- --stage=quotes
+          npm run ingest -- --stage=prices
+          npm run ingest -- --stage=valuations
+
+      - name: Manual run
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          npm run ingest -- \
+            --stage=${{ inputs.stage }} \
+            --provider=${{ inputs.provider }} \
+            ${{ inputs.symbols != '' && format('--symbols={0}', inputs.symbols) || '' }}
+
+      # The ingest CLI exits non-zero on a fatal stage, so the step above already
+      # fails the job. This asks the deployed watchdog to assess and alert
+      # immediately instead of waiting up to an hour for its own schedule.
+      - name: Trigger health check
+        if: always() && env.HEALTH_URL != ''
+        env:
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl -sS -o /dev/null -w 'health check: %{http_code}\n' \
+            -H "Authorization: Bearer $CRON_SECRET" "$HEALTH_URL" || true
