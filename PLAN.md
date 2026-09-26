@@ -1,5 +1,10 @@
 # finlens — implementation plan
 
+> **2026-09-26: migrated from Postgres + Drizzle + Auth.js to Firestore + Firebase Auth.**
+> Sections below describing tables, Drizzle and Auth.js are historical. Current data
+> layout: `src/db/schema.ts`. Current auth: `src/auth.ts` (session cookie from a
+> Firebase ID token; Bearer ID token for API clients — the mobile M4 path).
+
 Fundamentals-first stock research app. Own build, own branding, own copy.
 Reference architecture derived from public technical signals of comparable products
 (Next.js on Vercel, Auth.js, local payment rails). No third-party assets or copy reused.

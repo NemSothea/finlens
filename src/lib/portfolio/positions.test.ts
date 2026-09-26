@@ -6,7 +6,7 @@ let nextId = 1
 
 function tx(over: Partial<Transaction> = {}): Transaction {
   return {
-    id: nextId++,
+    id: `t${String(nextId++).padStart(6, '0')}`,
     symbol: 'AAPL',
     kind: 'buy',
     quantity: 10,
@@ -241,10 +241,10 @@ describe('derivePositions — ordering', () => {
 
   test('same-timestamp trades break ties on id, deterministically', () => {
     const at = new Date('2024-01-01T00:00:00Z')
-    const a = { ...tx({ quantity: 10, pricePerShare: 100, tradedAt: at }), id: 1 }
+    const a = { ...tx({ quantity: 10, pricePerShare: 100, tradedAt: at }), id: 'a' }
     const b = {
       ...tx({ kind: 'sell' as const, quantity: 10, pricePerShare: 150, tradedAt: at }),
-      id: 2,
+      id: 'b',
     }
 
     const one = derivePositions([a, b])
@@ -252,6 +252,27 @@ describe('derivePositions — ordering', () => {
 
     assert.equal(one.warnings.length, 0)
     close(one.positions[0].realizedGain, two.positions[0].realizedGain)
+  })
+
+  test('same-timestamp trades replay in entry order before id order', () => {
+    // Firestore ids are random: the sell's id sorts first here, but it was
+    // recorded after the buy, so it must replay after the buy.
+    const at = new Date('2024-01-01T00:00:00Z')
+    const buy = {
+      ...tx({ quantity: 10, pricePerShare: 100, tradedAt: at }),
+      id: 'zzz',
+      createdAt: new Date('2024-01-01T10:00:00Z'),
+    }
+    const sell = {
+      ...tx({ kind: 'sell' as const, quantity: 10, pricePerShare: 150, tradedAt: at }),
+      id: 'aaa',
+      createdAt: new Date('2024-01-01T10:05:00Z'),
+    }
+
+    const result = derivePositions([sell, buy])
+
+    assert.equal(result.warnings.length, 0)
+    close(result.positions[0].realizedGain, 500)
   })
 
   test('openedAt is the first trade date', () => {

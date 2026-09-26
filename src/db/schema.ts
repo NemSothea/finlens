@@ -1,385 +1,358 @@
-import {
-  pgTable,
-  text,
-  integer,
-  boolean,
-  timestamp,
-  date,
-  doublePrecision,
-  numeric,
-  jsonb,
-  primaryKey,
-  uniqueIndex,
-  index,
-  serial,
-} from 'drizzle-orm/pg-core'
+import type { Timestamp } from 'firebase-admin/firestore'
+import { db, safeId } from './index'
 
 /* ------------------------------------------------------------------ *
- * Reference data — owned copy of vendor fundamentals.
- * Every column the app reads lives here. The vendor is never on the
- * request path; the ingest pipeline is the only writer.
+ * Firestore layout
+ *
+ *   companies/{symbol}                      profile + embedded quote + dcf summary
+ *     financials/{period}_{periodEnd}       one doc per reporting period
+ *     prices/{year}                         { bars: { 'YYYY-MM-DD': bar } }
+ *   valuations/{symbol}_{method}            full DCF output + assumptions
+ *
+ *   users/{uid}                             profile mirror of the Auth record
+ *     watchlist/{symbol}
+ *     portfolios/{portfolioId}
+ *       transactions/{transactionId}
+ *   subscriptions/{uid}
+ *
+ *   payments/{hash(provider, reference)}
+ *   paymentEvents/{hash(provider, eventId)} webhook idempotency ledger
+ *   ingestRuns/{auto}
+ *   opsAlerts/{hash(fingerprint)}
+ *
+ * Why the quote and DCF summary live inside the company doc: Firestore has no
+ * joins. The detail page, the landing list, search and the watchlist all want
+ * "company + price + fair value" together; embedding makes each of those one
+ * read per company instead of three, and lets the landing list sort by market
+ * cap in a single query.
+ *
+ * Why prices are bucketed by year: one doc per trading day would make a 5-year
+ * chart cost ~1,250 document reads per page view. One doc per year costs 5 and
+ * stays far under the 1 MiB document limit (~252 bars × ~100 bytes).
  * ------------------------------------------------------------------ */
 
-export const companies = pgTable(
-  'companies',
-  {
-    symbol: text('symbol').primaryKey(),
-    name: text('name').notNull(),
-    exchange: text('exchange'),
-    currency: text('currency'),
-    country: text('country'),
-    sector: text('sector'),
-    industry: text('industry'),
-    website: text('website'),
-    description: text('description'),
-    ceo: text('ceo'),
-    employees: integer('employees'),
-    ipoDate: date('ipo_date'),
-    /** false = delisted or dropped from our universe; we keep the history. */
-    isActive: boolean('is_active').notNull().default(true),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [index('companies_exchange_idx').on(t.exchange), index('companies_sector_idx').on(t.sector)],
-)
+export const COLLECTIONS = {
+  companies: 'companies',
+  financials: 'financials',
+  prices: 'prices',
+  valuations: 'valuations',
+  users: 'users',
+  watchlist: 'watchlist',
+  portfolios: 'portfolios',
+  transactions: 'transactions',
+  subscriptions: 'subscriptions',
+  payments: 'payments',
+  paymentEvents: 'paymentEvents',
+  ingestRuns: 'ingestRuns',
+  opsAlerts: 'opsAlerts',
+} as const
+
+/* ------------------------------------------------------------------ *
+ * Reference data — owned copy of vendor fundamentals. The ingest
+ * pipeline is the only writer.
+ * ------------------------------------------------------------------ */
+
+export interface QuoteDoc {
+  price: number | null
+  previousClose: number | null
+  dayChangePct: number | null
+  marketCap: number | null
+  sharesOutstanding: number | null
+  volume: number | null
+  peRatio: number | null
+  yearHigh: number | null
+  yearLow: number | null
+  asOf: Timestamp | Date
+}
+
+export interface DcfSummaryDoc {
+  fairValuePerShare: number | null
+  marginOfSafetyPct: number | null
+  impliedGrowthRate: number | null
+  computedAt: Timestamp | Date
+}
+
+export interface CompanyDoc {
+  symbol: string
+  name: string
+  exchange: string | null
+  currency?: string | null
+  country?: string | null
+  sector?: string | null
+  industry?: string | null
+  website?: string | null
+  description?: string | null
+  ceo?: string | null
+  employees?: number | null
+  ipoDate?: string | null
+  /** false = delisted or dropped from our universe; we keep the history. */
+  isActive: boolean
+  /** Lower-cased prefixes of the ticker and of each word of the name — the
+   *  search index. Firestore has no ILIKE; `array-contains` on this is the
+   *  substitute. */
+  keywords: string[]
+  /** Denormalised from `quote.marketCap` (0 when unknown) so the landing list
+   *  and search can order by size without a join. */
+  marketCap: number
+  /** Newest stored price bar — where the incremental price stage resumes. */
+  lastPriceDate?: string | null
+  quote?: QuoteDoc | null
+  dcf?: DcfSummaryDoc | null
+  updatedAt: Timestamp | Date
+}
 
 /**
- * All three statements flattened into one row per reporting period.
- *
- * Flattened rather than three tables because every read path we have wants
- * revenue, net income and free cash flow together — splitting them buys
- * normalisation we never use and costs a 3-way join on the hottest query.
+ * All three statements flattened into one doc per reporting period, same as
+ * the old table: every read path wants revenue, net income and free cash flow
+ * together.
  */
-export const financialStatements = pgTable(
-  'financial_statements',
-  {
-    id: serial('id').primaryKey(),
-    symbol: text('symbol')
-      .notNull()
-      .references(() => companies.symbol, { onDelete: 'cascade' }),
-    /** 'FY' annual, 'Q1'..'Q4' quarterly, 'TTM' derived. */
-    period: text('period').notNull(),
-    fiscalYear: integer('fiscal_year').notNull(),
-    periodEnd: date('period_end').notNull(),
-    reportedCurrency: text('reported_currency'),
+export interface FinancialStatementDoc {
+  symbol: string
+  /** 'FY' annual, 'Q1'..'Q4' quarterly, 'TTM' derived. */
+  period: string
+  /** Separate flag because Firestore cannot combine `period != 'FY'` with an
+   *  order on `periodEnd` without ordering on `period` first. */
+  isAnnual: boolean
+  fiscalYear: number
+  periodEnd: string
+  reportedCurrency: string | null
 
-    // income statement
-    revenue: doublePrecision('revenue'),
-    costOfRevenue: doublePrecision('cost_of_revenue'),
-    grossProfit: doublePrecision('gross_profit'),
-    operatingExpenses: doublePrecision('operating_expenses'),
-    operatingIncome: doublePrecision('operating_income'),
-    ebitda: doublePrecision('ebitda'),
-    interestExpense: doublePrecision('interest_expense'),
-    incomeTax: doublePrecision('income_tax'),
-    netIncome: doublePrecision('net_income'),
-    eps: doublePrecision('eps'),
-    epsDiluted: doublePrecision('eps_diluted'),
-    sharesBasic: doublePrecision('shares_basic'),
-    sharesDiluted: doublePrecision('shares_diluted'),
+  revenue: number | null
+  costOfRevenue: number | null
+  grossProfit: number | null
+  operatingExpenses: number | null
+  operatingIncome: number | null
+  ebitda: number | null
+  interestExpense: number | null
+  incomeTax: number | null
+  netIncome: number | null
+  eps: number | null
+  epsDiluted: number | null
+  sharesBasic: number | null
+  sharesDiluted: number | null
 
-    // balance sheet
-    cashAndEquivalents: doublePrecision('cash_and_equivalents'),
-    shortTermInvestments: doublePrecision('short_term_investments'),
-    inventory: doublePrecision('inventory'),
-    totalCurrentAssets: doublePrecision('total_current_assets'),
-    totalAssets: doublePrecision('total_assets'),
-    totalCurrentLiabilities: doublePrecision('total_current_liabilities'),
-    shortTermDebt: doublePrecision('short_term_debt'),
-    longTermDebt: doublePrecision('long_term_debt'),
-    totalDebt: doublePrecision('total_debt'),
-    totalLiabilities: doublePrecision('total_liabilities'),
-    totalEquity: doublePrecision('total_equity'),
+  cashAndEquivalents: number | null
+  shortTermInvestments: number | null
+  inventory: number | null
+  totalCurrentAssets: number | null
+  totalAssets: number | null
+  totalCurrentLiabilities: number | null
+  shortTermDebt: number | null
+  longTermDebt: number | null
+  totalDebt: number | null
+  totalLiabilities: number | null
+  totalEquity: number | null
 
-    // cash flow
-    operatingCashFlow: doublePrecision('operating_cash_flow'),
-    capitalExpenditure: doublePrecision('capital_expenditure'),
-    freeCashFlow: doublePrecision('free_cash_flow'),
-    dividendsPaid: doublePrecision('dividends_paid'),
-    shareBuybacks: doublePrecision('share_buybacks'),
+  operatingCashFlow: number | null
+  capitalExpenditure: number | null
+  freeCashFlow: number | null
+  dividendsPaid: number | null
+  shareBuybacks: number | null
 
-    source: text('source').notNull(),
-    ingestedAt: timestamp('ingested_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    // natural key — the upsert target for idempotent re-ingest
-    uniqueIndex('financials_symbol_period_end_uq').on(t.symbol, t.period, t.periodEnd),
-    index('financials_symbol_year_idx').on(t.symbol, t.fiscalYear),
-  ],
-)
+  source: string
+  ingestedAt: Timestamp | Date
+}
 
-export const quotes = pgTable('quotes', {
-  symbol: text('symbol')
-    .primaryKey()
-    .references(() => companies.symbol, { onDelete: 'cascade' }),
-  price: doublePrecision('price'),
-  previousClose: doublePrecision('previous_close'),
-  dayChangePct: doublePrecision('day_change_pct'),
-  marketCap: doublePrecision('market_cap'),
-  sharesOutstanding: doublePrecision('shares_outstanding'),
-  volume: doublePrecision('volume'),
-  peRatio: doublePrecision('pe_ratio'),
-  yearHigh: doublePrecision('year_high'),
-  yearLow: doublePrecision('year_low'),
-  asOf: timestamp('as_of', { withTimezone: true }).notNull().defaultNow(),
-})
+/** Compact bar keys — ~250 of these share one document per year. */
+export interface PriceBarDoc {
+  o: number | null
+  h: number | null
+  l: number | null
+  c: number
+  ac: number | null
+  v: number | null
+}
 
-export const priceHistory = pgTable(
-  'price_history',
-  {
-    symbol: text('symbol')
-      .notNull()
-      .references(() => companies.symbol, { onDelete: 'cascade' }),
-    tradeDate: date('trade_date').notNull(),
-    open: doublePrecision('open'),
-    high: doublePrecision('high'),
-    low: doublePrecision('low'),
-    close: doublePrecision('close').notNull(),
-    adjClose: doublePrecision('adj_close'),
-    volume: doublePrecision('volume'),
-  },
-  (t) => [primaryKey({ columns: [t.symbol, t.tradeDate] })],
-)
+export interface PriceYearDoc {
+  symbol: string
+  year: number
+  bars: Record<string, PriceBarDoc>
+}
 
 /**
  * Cached valuation output. `assumptions` is stored alongside the result so any
- * number shown in the UI can be explained months later — without it, a stale
- * fair value is indistinguishable from a wrong one.
+ * number shown in the UI can be explained months later.
  */
-export const valuations = pgTable(
-  'valuations',
-  {
-    id: serial('id').primaryKey(),
-    symbol: text('symbol')
-      .notNull()
-      .references(() => companies.symbol, { onDelete: 'cascade' }),
-    method: text('method').notNull(), // 'dcf' | 'reverse_dcf'
-    fairValuePerShare: doublePrecision('fair_value_per_share'),
-    marginOfSafetyPct: doublePrecision('margin_of_safety_pct'),
-    impliedGrowthRate: doublePrecision('implied_growth_rate'),
-    assumptions: jsonb('assumptions').notNull(),
-    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [uniqueIndex('valuations_symbol_method_uq').on(t.symbol, t.method)],
-)
+export interface ValuationDoc {
+  symbol: string
+  method: string // 'dcf' | 'reverse_dcf'
+  fairValuePerShare: number | null
+  marginOfSafetyPct: number | null
+  impliedGrowthRate: number | null
+  assumptions: unknown
+  computedAt: Timestamp | Date
+}
 
 /* ------------------------------------------------------------------ *
- * Auth.js v5 adapter tables
+ * Users — identity lives in Firebase Auth; this is the mirror the app
+ * reads (checkout email, admin scripts). `role` is authoritative as a
+ * custom claim on the Auth record; the copy here is for display.
  * ------------------------------------------------------------------ */
 
-export const users = pgTable('users', {
-  id: text('id').primaryKey(),
-  name: text('name'),
-  email: text('email').unique(),
-  emailVerified: timestamp('email_verified', { withTimezone: true }),
-  image: text('image'),
-  passwordHash: text('password_hash'),
-  role: text('role').notNull().default('user'), // 'user' | 'admin'
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-})
+export interface UserDoc {
+  email: string | null
+  name: string | null
+  image: string | null
+  role: string // 'user' | 'admin'
+  createdAt: Timestamp | Date
+}
 
-export const accounts = pgTable(
-  'accounts',
-  {
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    type: text('type').notNull(),
-    provider: text('provider').notNull(),
-    providerAccountId: text('provider_account_id').notNull(),
-    refresh_token: text('refresh_token'),
-    access_token: text('access_token'),
-    expires_at: integer('expires_at'),
-    token_type: text('token_type'),
-    scope: text('scope'),
-    id_token: text('id_token'),
-    session_state: text('session_state'),
-  },
-  (t) => [primaryKey({ columns: [t.provider, t.providerAccountId] })],
-)
+export interface SubscriptionDoc {
+  plan: string // 'free' | 'pro_monthly' | 'pro_annual'
+  status: string // 'active' | 'past_due' | 'canceled' | 'trialing'
+  provider: string | null // 'payway' | 'khqr' | 'stripe' | 'manual'
+  providerRef: string | null
+  currentPeriodEnd: Timestamp | Date | null
+  cancelAtPeriodEnd: boolean
+  updatedAt: Timestamp | Date
+}
 
-export const sessions = pgTable('sessions', {
-  sessionToken: text('session_token').primaryKey(),
-  userId: text('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  expires: timestamp('expires', { withTimezone: true }).notNull(),
-})
+export interface WatchlistItemDoc {
+  symbol: string
+  note: string | null
+  targetPrice: number | null
+  addedAt: Timestamp | Date
+}
 
-export const verificationTokens = pgTable(
-  'verification_tokens',
-  {
-    identifier: text('identifier').notNull(),
-    token: text('token').notNull(),
-    expires: timestamp('expires', { withTimezone: true }).notNull(),
-  },
-  (t) => [primaryKey({ columns: [t.identifier, t.token] })],
-)
-
-/* ------------------------------------------------------------------ *
- * Subscription + user data
- * ------------------------------------------------------------------ */
-
-export const subscriptions = pgTable('subscriptions', {
-  userId: text('user_id')
-    .primaryKey()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  plan: text('plan').notNull(), // 'free' | 'pro_monthly' | 'pro_annual'
-  status: text('status').notNull(), // 'active' | 'past_due' | 'canceled' | 'trialing'
-  provider: text('provider'), // 'payway' | 'khqr' | 'stripe' | 'manual'
-  providerRef: text('provider_ref'),
-  currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
-  cancelAtPeriodEnd: boolean('cancel_at_period_end').notNull().default(false),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-})
-
-export const watchlistItems = pgTable(
-  'watchlist_items',
-  {
-    id: serial('id').primaryKey(),
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    symbol: text('symbol')
-      .notNull()
-      .references(() => companies.symbol, { onDelete: 'cascade' }),
-    note: text('note'),
-    targetPrice: numeric('target_price', { precision: 18, scale: 6 }),
-    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [uniqueIndex('watchlist_user_symbol_uq').on(t.userId, t.symbol)],
-)
-
-export const portfolios = pgTable('portfolios', {
-  id: serial('id').primaryKey(),
-  userId: text('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  name: text('name').notNull(),
-  baseCurrency: text('base_currency').notNull().default('USD'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-})
+export interface PortfolioDoc {
+  name: string
+  baseCurrency: string
+  createdAt: Timestamp | Date
+}
 
 /**
  * Immutable trade log. Positions are DERIVED from this on read and are never
- * stored — that keeps cost basis auditable and makes corrections additive
- * instead of destructive.
+ * stored — cost basis stays auditable and corrections are additive.
  */
-export const transactions = pgTable(
-  'transactions',
-  {
-    id: serial('id').primaryKey(),
-    portfolioId: integer('portfolio_id')
-      .notNull()
-      .references(() => portfolios.id, { onDelete: 'cascade' }),
-    symbol: text('symbol').notNull(),
-    kind: text('kind').notNull(), // 'buy' | 'sell' | 'dividend' | 'split'
-    quantity: numeric('quantity', { precision: 24, scale: 8 }).notNull(),
-    pricePerShare: numeric('price_per_share', { precision: 18, scale: 6 }).notNull(),
-    fees: numeric('fees', { precision: 18, scale: 6 }).notNull().default('0'),
-    currency: text('currency').notNull().default('USD'),
-    tradedAt: timestamp('traded_at', { withTimezone: true }).notNull(),
-    note: text('note'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [index('transactions_portfolio_idx').on(t.portfolioId, t.symbol)],
-)
+export interface TransactionDoc {
+  symbol: string
+  kind: string // 'buy' | 'sell' | 'dividend' | 'split'
+  quantity: number
+  pricePerShare: number
+  fees: number
+  currency: string
+  tradedAt: Timestamp | Date
+  note: string | null
+  createdAt: Timestamp | Date
+}
 
 /* ------------------------------------------------------------------ *
  * Payments
  * ------------------------------------------------------------------ */
 
 /**
- * A single purchase attempt. One row per checkout, created BEFORE the user is
- * sent to the provider — so a payment that completes while the browser dies
- * still has somewhere to land when the webhook arrives.
+ * A single purchase attempt, written BEFORE the user is sent to the provider
+ * so a payment that completes while the browser dies still has somewhere to
+ * land when the webhook arrives.
  */
-export const payments = pgTable(
-  'payments',
-  {
-    id: serial('id').primaryKey(),
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    provider: text('provider').notNull(), // 'payway' | 'manual'
-    /** Our id, sent to the provider and echoed back. Unique per attempt. */
-    reference: text('reference').notNull(),
-    /** The provider's own transaction id, once known. */
-    providerRef: text('provider_ref'),
-    plan: text('plan').notNull(),
-    amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
-    currency: text('currency').notNull().default('USD'),
-    status: text('status').notNull().default('pending'), // pending|paid|failed|refunded
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    uniqueIndex('payments_provider_reference_uq').on(t.provider, t.reference),
-    index('payments_user_idx').on(t.userId),
-  ],
-)
+export interface PaymentDoc {
+  userId: string
+  provider: string
+  /** Our id, sent to the provider and echoed back. Unique per attempt. */
+  reference: string
+  providerRef: string | null
+  plan: string
+  amount: number
+  currency: string
+  status: string // pending|paid|failed|refunded
+  createdAt: Timestamp | Date
+  updatedAt: Timestamp | Date
+}
 
 /**
- * Webhook ledger — the idempotency mechanism.
- *
- * Every inbound provider callback is recorded here first, keyed by the
- * provider's own event id. The unique index is what makes replay safe: a
- * duplicate insert conflicts, the handler sees it was already processed, and
- * the subscription is not extended twice.
- *
- * Providers retry aggressively and deliver out of order. Assuming exactly-once
- * delivery is how customers end up with double billing periods.
+ * Webhook ledger — the idempotency mechanism. The doc id is derived from the
+ * provider's own event id, so a replay finds the doc already there and stops
+ * before the subscription is extended twice.
  */
-export const paymentEvents = pgTable(
-  'payment_events',
-  {
-    id: serial('id').primaryKey(),
-    provider: text('provider').notNull(),
-    /** The provider's unique id for this event. The idempotency key. */
-    eventId: text('event_id').notNull(),
-    type: text('type').notNull(),
-    reference: text('reference'),
-    payload: jsonb('payload').notNull(),
-    receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
-    processedAt: timestamp('processed_at', { withTimezone: true }),
-    /** 'applied' | 'duplicate' | 'ignored' | 'error' */
-    result: text('result'),
-    error: text('error'),
-  },
-  (t) => [uniqueIndex('payment_events_provider_event_uq').on(t.provider, t.eventId)],
-)
+export interface PaymentEventDoc {
+  provider: string
+  eventId: string
+  type: string
+  reference: string | null
+  /** Raw provider payload as JSON text. */
+  payload: string
+  receivedAt: Timestamp | Date
+  processedAt: Timestamp | Date | null
+  /** 'applied' | 'duplicate' | 'ignored' | 'error' */
+  result: string | null
+  error: string | null
+}
 
 /* ------------------------------------------------------------------ *
- * Pipeline observability — a nightly run that fails silently is the
- * failure mode that kills data products.
+ * Pipeline observability
  * ------------------------------------------------------------------ */
 
-export const ingestRuns = pgTable('ingest_runs', {
-  id: serial('id').primaryKey(),
-  stage: text('stage').notNull(),
-  status: text('status').notNull(), // 'running' | 'ok' | 'partial' | 'failed'
-  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
-  finishedAt: timestamp('finished_at', { withTimezone: true }),
-  itemsOk: integer('items_ok').notNull().default(0),
-  itemsFailed: integer('items_failed').notNull().default(0),
-  vendorCalls: integer('vendor_calls').notNull().default(0),
-  errors: jsonb('errors'),
-})
+export interface IngestRunDoc {
+  stage: string
+  status: string // 'running' | 'ok' | 'partial' | 'failed'
+  startedAt: Timestamp | Date
+  finishedAt: Timestamp | Date | null
+  itemsOk: number
+  itemsFailed: number
+  vendorCalls: number
+  errors: Array<{ item: string; message: string }> | null
+}
 
 /**
- * Alert de-duplication state.
- *
- * The health check runs hourly on a serverless function, so there is no
- * in-process memory between checks — "have we already told someone about this?"
- * has to be a row. Without it, one broken nightly run sends 24 identical
- * messages and the channel gets muted, which is the same as having no alerting.
+ * Alert de-duplication state. The health check runs on a serverless function
+ * with no memory between runs, so "have we already told someone?" is a doc.
  */
-export const opsAlerts = pgTable('ops_alerts', {
-  id: serial('id').primaryKey(),
-  /** Identifies the problem set, not the moment — see `healthFingerprint`. */
-  fingerprint: text('fingerprint').notNull().unique(),
-  firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
-  lastSentAt: timestamp('last_sent_at', { withTimezone: true }).notNull().defaultNow(),
-  sends: integer('sends').notNull().default(1),
-  /** Set when the pipeline recovered, so recovery is announced exactly once. */
-  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
-})
+export interface OpsAlertDoc {
+  fingerprint: string
+  firstSeenAt: Timestamp | Date
+  lastSentAt: Timestamp | Date
+  sends: number
+  resolvedAt: Timestamp | Date | null
+}
+
+/* ------------------------------------------------------------------ *
+ * References — one place that knows the paths.
+ * ------------------------------------------------------------------ */
+
+export const refs = {
+  companies: () => db.collection(COLLECTIONS.companies),
+  company: (symbol: string) => db.collection(COLLECTIONS.companies).doc(symbol.toUpperCase()),
+  financials: (symbol: string) => refs.company(symbol).collection(COLLECTIONS.financials),
+  financial: (symbol: string, period: string, periodEnd: string) =>
+    refs.financials(symbol).doc(`${period}_${periodEnd}`),
+  prices: (symbol: string) => refs.company(symbol).collection(COLLECTIONS.prices),
+  priceYear: (symbol: string, year: number) => refs.prices(symbol).doc(String(year)),
+  valuation: (symbol: string, method: string) =>
+    db.collection(COLLECTIONS.valuations).doc(`${symbol.toUpperCase()}_${method}`),
+
+  user: (uid: string) => db.collection(COLLECTIONS.users).doc(uid),
+  watchlist: (uid: string) => refs.user(uid).collection(COLLECTIONS.watchlist),
+  watchlistItem: (uid: string, symbol: string) => refs.watchlist(uid).doc(symbol.toUpperCase()),
+  portfolios: (uid: string) => refs.user(uid).collection(COLLECTIONS.portfolios),
+  portfolio: (uid: string, portfolioId: string) => refs.portfolios(uid).doc(portfolioId),
+  transactions: (uid: string, portfolioId: string) =>
+    refs.portfolio(uid, portfolioId).collection(COLLECTIONS.transactions),
+  subscription: (uid: string) => db.collection(COLLECTIONS.subscriptions).doc(uid),
+
+  payment: (provider: string, reference: string) =>
+    db.collection(COLLECTIONS.payments).doc(safeId(provider, reference)),
+  paymentEvent: (provider: string, eventId: string) =>
+    db.collection(COLLECTIONS.paymentEvents).doc(safeId(provider, eventId)),
+  ingestRuns: () => db.collection(COLLECTIONS.ingestRuns),
+  opsAlerts: () => db.collection(COLLECTIONS.opsAlerts),
+  opsAlert: (fingerprint: string) => db.collection(COLLECTIONS.opsAlerts).doc(safeId(fingerprint)),
+}
+
+/**
+ * Search index terms. Every prefix (min length 1 for the ticker, 2 for name
+ * words) up to 20 chars, lower-cased. "Apple Inc." → a, aa, aap, aapl, ap, app,
+ * appl, apple, in, inc.
+ */
+export function buildKeywords(symbol: string, name: string): string[] {
+  const out = new Set<string>()
+  const add = (word: string, minLength: number) => {
+    const w = word.toLowerCase().slice(0, 20)
+    for (let i = minLength; i <= w.length; i++) out.add(w.slice(0, i))
+  }
+
+  add(symbol.replace(/[^A-Za-z0-9.\-]/g, ''), 1)
+  for (const word of name.split(/[^\p{L}\p{N}]+/u)) {
+    if (word) add(word, 2)
+  }
+  return [...out]
+}

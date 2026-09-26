@@ -1,12 +1,13 @@
+import { FieldPath } from 'firebase-admin/firestore'
 import { db } from '@/db'
 import {
-  companies,
-  financialStatements,
-  priceHistory,
-  quotes,
-  valuations,
+  buildKeywords,
+  refs,
+  type CompanyDoc,
+  type FinancialStatementDoc,
+  type PriceBarDoc,
+  type ValuationDoc,
 } from '@/db/schema'
-import { and, desc, eq, inArray, sql as raw } from 'drizzle-orm'
 import { mapWithConcurrency } from '@/lib/providers/http'
 import type { MarketDataProvider } from '@/lib/providers/types'
 import { chunk, type RunContext } from './runner'
@@ -22,20 +23,34 @@ export interface StageOptions {
   concurrency?: number
 }
 
+/** A Firestore batch holds 500 writes; stay under it with headroom. */
+const BATCH_SIZE = 400
+
 /** Resolve which symbols a stage should operate on: explicit list, else the
  *  active universe already in our DB. Never re-derives the universe from the
  *  vendor — that is the `universe` stage's job and it runs weekly, not nightly. */
 async function resolveSymbols(opts: StageOptions): Promise<string[]> {
   if (opts.symbols?.length) return opts.symbols
 
-  const rows = await db
-    .select({ symbol: companies.symbol })
-    .from(companies)
-    .where(eq(companies.isActive, true))
-    .orderBy(companies.symbol)
+  const snap = await refs
+    .companies()
+    .where('isActive', '==', true)
+    .orderBy(FieldPath.documentId())
     .limit(opts.limit ?? 100_000)
+    .select()
+    .get()
 
-  return rows.map((r) => r.symbol)
+  return snap.docs.map((d) => d.id)
+}
+
+/** Which of these symbols already have a company doc. */
+async function existingSymbols(symbols: string[]): Promise<Set<string>> {
+  const out = new Set<string>()
+  for (const batch of chunk(symbols, 300)) {
+    const snaps = await db.getAll(...batch.map((s) => refs.company(s)), { fieldMask: ['symbol'] })
+    for (const s of snaps) if (s.exists) out.add(s.id)
+  }
+  return out
 }
 
 /* ------------------------------------------------------------------ *
@@ -52,29 +67,32 @@ export async function stageUniverse(opts: StageOptions) {
   const symbols = await provider.listSymbols(exchanges)
   const capped = opts.limit ? symbols.slice(0, opts.limit) : symbols
 
-  for (const batch of chunk(capped, 500)) {
-    await db
-      .insert(companies)
-      .values(
-        batch.map((s) => ({
-          symbol: s.symbol,
+  for (const batch of chunk(capped, BATCH_SIZE)) {
+    const existing = await existingSymbols(batch.map((s) => s.symbol))
+    const writes = db.batch()
+
+    for (const s of batch) {
+      // Name/exchange only, merged. Do NOT clobber profile fields, the quote
+      // or the DCF summary — this stage has none of them.
+      writes.set(
+        refs.company(s.symbol),
+        {
+          symbol: s.symbol.toUpperCase(),
           name: s.name,
           exchange: s.exchange,
           isActive: true,
+          keywords: buildKeywords(s.symbol, s.name),
           updatedAt: new Date(),
-        })),
+          // A new company needs a marketCap for the landing-page ordering
+          // (Firestore drops docs missing the ordered field). Existing ones
+          // keep the value the quotes stage wrote.
+          ...(existing.has(s.symbol.toUpperCase()) ? {} : { marketCap: 0 }),
+        } satisfies Partial<CompanyDoc>,
+        { merge: true },
       )
-      // Name/exchange only. Do NOT clobber profile fields here — this stage
-      // has no profile data and would blank them out on every weekly run.
-      .onConflictDoUpdate({
-        target: companies.symbol,
-        set: {
-          name: raw`excluded.name`,
-          exchange: raw`excluded.exchange`,
-          isActive: true,
-          updatedAt: new Date(),
-        },
-      })
+    }
+
+    await writes.commit()
     ctx.recordOk(batch.length)
   }
 
@@ -88,6 +106,7 @@ export async function stageUniverse(opts: StageOptions) {
 export async function stageProfiles(opts: StageOptions) {
   const { provider, ctx } = opts
   const symbols = await resolveSymbols(opts)
+  const existing = await existingSymbols(symbols)
 
   await mapWithConcurrency(symbols, opts.concurrency ?? 4, async (symbol) => {
     try {
@@ -97,26 +116,17 @@ export async function stageProfiles(opts: StageOptions) {
         return
       }
 
-      await db
-        .insert(companies)
-        .values({ ...p, isActive: true, updatedAt: new Date() })
-        .onConflictDoUpdate({
-          target: companies.symbol,
-          set: {
-            name: p.name,
-            exchange: p.exchange,
-            currency: p.currency,
-            country: p.country,
-            sector: p.sector,
-            industry: p.industry,
-            website: p.website,
-            description: p.description,
-            ceo: p.ceo,
-            employees: p.employees,
-            ipoDate: p.ipoDate,
-            updatedAt: new Date(),
-          },
-        })
+      await refs.company(symbol).set(
+        {
+          ...p,
+          symbol: p.symbol.toUpperCase(),
+          isActive: true,
+          keywords: buildKeywords(p.symbol, p.name),
+          updatedAt: new Date(),
+          ...(existing.has(symbol.toUpperCase()) ? {} : { marketCap: 0 }),
+        } satisfies Partial<CompanyDoc>,
+        { merge: true },
+      )
       ctx.recordOk()
     } catch (error) {
       ctx.recordFailure(symbol, error)
@@ -143,51 +153,22 @@ export async function stageFinancials(opts: StageOptions) {
         return
       }
 
-      for (const batch of chunk(annual, 100)) {
-        await db
-          .insert(financialStatements)
-          .values(batch.map((f) => ({ ...f, source: provider.name, ingestedAt: new Date() })))
-          // Restatements are normal — re-ingest overwrites the same natural key
-          // rather than accumulating duplicate periods.
-          .onConflictDoUpdate({
-            target: [
-              financialStatements.symbol,
-              financialStatements.period,
-              financialStatements.periodEnd,
-            ],
-            set: buildExcludedSet([
-              'reported_currency',
-              'revenue',
-              'cost_of_revenue',
-              'gross_profit',
-              'operating_expenses',
-              'operating_income',
-              'ebitda',
-              'interest_expense',
-              'income_tax',
-              'net_income',
-              'eps',
-              'eps_diluted',
-              'shares_basic',
-              'shares_diluted',
-              'cash_and_equivalents',
-              'short_term_investments',
-              'inventory',
-              'total_current_assets',
-              'total_assets',
-              'total_current_liabilities',
-              'short_term_debt',
-              'long_term_debt',
-              'total_debt',
-              'total_liabilities',
-              'total_equity',
-              'operating_cash_flow',
-              'capital_expenditure',
-              'free_cash_flow',
-              'dividends_paid',
-              'share_buybacks',
-            ]),
-          })
+      for (const batch of chunk(annual, BATCH_SIZE)) {
+        const writes = db.batch()
+        for (const f of batch) {
+          // Doc id is the natural key (period + period end). Restatements are
+          // normal — re-ingest overwrites the same doc rather than accumulating
+          // duplicate periods.
+          const doc: FinancialStatementDoc = {
+            ...f,
+            symbol: f.symbol.toUpperCase(),
+            isAnnual: f.period === 'FY',
+            source: provider.name,
+            ingestedAt: new Date(),
+          }
+          writes.set(refs.financial(symbol, f.period, f.periodEnd), doc)
+        }
+        await writes.commit()
       }
       ctx.recordOk(annual.length)
     } catch (error) {
@@ -206,30 +187,32 @@ export async function stageQuotes(opts: StageOptions) {
   const { provider, ctx } = opts
   const symbols = await resolveSymbols(opts)
 
-  for (const batch of chunk(symbols, 500)) {
+  for (const batch of chunk(symbols, BATCH_SIZE)) {
     try {
       const fetched = await provider.getQuotes(batch)
       if (fetched.length === 0) continue
 
-      await db
-        .insert(quotes)
-        .values(fetched.map((q) => ({ ...q, asOf: new Date() })))
-        .onConflictDoUpdate({
-          target: quotes.symbol,
-          set: buildExcludedSet([
-            'price',
-            'previous_close',
-            'day_change_pct',
-            'market_cap',
-            'shares_outstanding',
-            'volume',
-            'pe_ratio',
-            'year_high',
-            'year_low',
-            'as_of',
-          ]),
-        })
-      ctx.recordOk(fetched.length)
+      // A quote for a symbol we do not cover would create a nameless company
+      // doc. The old foreign key refused those; this does the same.
+      const known = await existingSymbols(fetched.map((q) => q.symbol))
+      const writes = db.batch()
+      let written = 0
+
+      for (const { symbol, ...q } of fetched) {
+        if (!known.has(symbol.toUpperCase())) continue
+        writes.set(
+          refs.company(symbol),
+          {
+            quote: { ...q, asOf: new Date() },
+            marketCap: q.marketCap ?? 0,
+          } satisfies Partial<CompanyDoc>,
+          { merge: true },
+        )
+        written++
+      }
+
+      await writes.commit()
+      ctx.recordOk(written)
     } catch (error) {
       ctx.recordFailure(`batch:${batch[0]}..${batch[batch.length - 1]}`, error)
     }
@@ -249,31 +232,53 @@ export async function stagePrices(opts: StageOptions) {
 
   await mapWithConcurrency(symbols, opts.concurrency ?? 4, async (symbol) => {
     try {
+      const companyRef = refs.company(symbol)
+      const company = await companyRef.get()
+      if (!company.exists) {
+        ctx.recordFailure(symbol, 'not in universe')
+        return
+      }
+
       // Incremental: resume from the newest stored bar, minus a small overlap
       // so late vendor corrections to recent days get picked up.
-      const [latest] = await db
-        .select({ tradeDate: priceHistory.tradeDate })
-        .from(priceHistory)
-        .where(eq(priceHistory.symbol, symbol))
-        .orderBy(desc(priceHistory.tradeDate))
-        .limit(1)
-
+      const latest = (company.data() as CompanyDoc).lastPriceDate ?? null
       const from = latest
-        ? isoDaysBefore(latest.tradeDate, lookbackDays)
+        ? isoDaysBefore(latest, lookbackDays)
         : isoDaysBefore(todayIso(), 365 * 10)
 
       const bars = await provider.getDailyPrices(symbol, from)
       if (bars.length === 0) return
 
-      for (const batch of chunk(bars, 1000)) {
-        await db
-          .insert(priceHistory)
-          .values(batch)
-          .onConflictDoUpdate({
-            target: [priceHistory.symbol, priceHistory.tradeDate],
-            set: buildExcludedSet(['open', 'high', 'low', 'close', 'adj_close', 'volume']),
-          })
+      // Group into one doc per year; a merge on the nested `bars` map adds or
+      // overwrites individual days without reading the year doc first.
+      const byYear = new Map<number, Record<string, PriceBarDoc>>()
+      let newest = latest ?? ''
+      for (const b of bars) {
+        const year = Number(b.tradeDate.slice(0, 4))
+        const days = byYear.get(year) ?? {}
+        days[b.tradeDate] = {
+          o: b.open,
+          h: b.high,
+          l: b.low,
+          c: b.close,
+          ac: b.adjClose,
+          v: b.volume,
+        }
+        byYear.set(year, days)
+        if (b.tradeDate > newest) newest = b.tradeDate
       }
+
+      const writes = db.batch()
+      for (const [year, days] of byYear) {
+        writes.set(
+          refs.priceYear(symbol, year),
+          { symbol: symbol.toUpperCase(), year, bars: days },
+          { merge: true },
+        )
+      }
+      writes.set(companyRef, { lastPriceDate: newest }, { merge: true })
+      await writes.commit()
+
       ctx.recordOk(bars.length)
     } catch (error) {
       ctx.recordFailure(symbol, error)
@@ -291,95 +296,83 @@ export async function stageValuations(opts: StageOptions) {
   const { ctx } = opts
   const symbols = await resolveSymbols(opts)
 
-  for (const batch of chunk(symbols, 100)) {
-    const rows = await db
-      .select({
-        symbol: financialStatements.symbol,
-        periodEnd: financialStatements.periodEnd,
-        freeCashFlow: financialStatements.freeCashFlow,
-        totalDebt: financialStatements.totalDebt,
-        cashAndEquivalents: financialStatements.cashAndEquivalents,
-        sharesDiluted: financialStatements.sharesDiluted,
-      })
-      .from(financialStatements)
-      .where(
-        and(
-          inArray(financialStatements.symbol, batch),
-          eq(financialStatements.period, 'FY'),
-        ),
-      )
-      .orderBy(financialStatements.symbol, desc(financialStatements.periodEnd))
+  await mapWithConcurrency(symbols, opts.concurrency ?? 8, async (symbol) => {
+    try {
+      const [statementsSnap, companySnap] = await Promise.all([
+        refs
+          .financials(symbol)
+          .where('isAnnual', '==', true)
+          .orderBy('periodEnd', 'desc')
+          .select('periodEnd', 'freeCashFlow', 'totalDebt', 'cashAndEquivalents', 'sharesDiluted')
+          .get(),
+        refs.company(symbol).get(),
+      ])
 
-    const bySymbol = new Map<string, typeof rows>()
-    for (const r of rows) {
-      const list = bySymbol.get(r.symbol) ?? []
-      list.push(r)
-      bySymbol.set(r.symbol, list)
-    }
+      if (!companySnap.exists || statementsSnap.empty) return
 
-    const quoteRows = await db
-      .select({
-        symbol: quotes.symbol,
-        price: quotes.price,
-        sharesOutstanding: quotes.sharesOutstanding,
-      })
-      .from(quotes)
-      .where(inArray(quotes.symbol, batch))
-
-    const quoteBySymbol = new Map(quoteRows.map((q) => [q.symbol, q]))
-
-    for (const [symbol, history] of bySymbol) {
-      try {
-        const quote = quoteBySymbol.get(symbol) ?? null
-
-        // Same derivation the detail page and the valuation endpoint use.
-        // Duplicating it here is how one company ends up with two different
-        // fair values depending on which surface you look at.
-        const derived = deriveDcfInputs(history, quote)
-
-        // Skip rather than guess. A fair value built on missing inputs is worse
-        // than no fair value — users act on these numbers.
-        if (!derived.ok) {
-          ctx.recordFailure(symbol, describeFailure(derived.reason))
-          continue
+      const history = statementsSnap.docs.map((d) => {
+        const f = d.data() as FinancialStatementDoc
+        return {
+          periodEnd: f.periodEnd,
+          freeCashFlow: f.freeCashFlow ?? null,
+          totalDebt: f.totalDebt ?? null,
+          cashAndEquivalents: f.cashAndEquivalents ?? null,
+          sharesDiluted: f.sharesDiluted ?? null,
         }
+      })
 
-        const { assumptions } = derived.inputs
-        const dcf = calculateDcf(assumptions)
-        const mos = quote?.price ? marginOfSafety(dcf.fairValuePerShare, quote.price) : null
+      const q = (companySnap.data() as CompanyDoc).quote
+      const quote = q ? { price: q.price ?? null, sharesOutstanding: q.sharesOutstanding ?? null } : null
 
-        const implied = quote?.price
-          ? reverseDcf({ ...assumptions, currentPrice: quote.price })
-          : null
+      // Same derivation the detail page and the valuation endpoint use.
+      // Duplicating it here is how one company ends up with two different
+      // fair values depending on which surface you look at.
+      const derived = deriveDcfInputs(history, quote)
 
-        await db
-          .insert(valuations)
-          .values({
-            symbol,
-            method: 'dcf',
-            fairValuePerShare: dcf.fairValuePerShare,
-            marginOfSafetyPct: mos != null && isFinite(mos) ? mos : null,
-            impliedGrowthRate: implied?.converged ? implied.impliedGrowthRate : null,
-            assumptions,
-            computedAt: new Date(),
-          })
-          .onConflictDoUpdate({
-            target: [valuations.symbol, valuations.method],
-            set: buildExcludedSet([
-              'fair_value_per_share',
-              'margin_of_safety_pct',
-              'implied_growth_rate',
-              'assumptions',
-              'computed_at',
-            ]),
-          })
-
-        ctx.recordOk()
-      } catch (error) {
-        ctx.recordFailure(symbol, error)
+      // Skip rather than guess. A fair value built on missing inputs is worse
+      // than no fair value — users act on these numbers.
+      if (!derived.ok) {
+        ctx.recordFailure(symbol, describeFailure(derived.reason))
+        return
       }
+
+      const { assumptions } = derived.inputs
+      const dcf = calculateDcf(assumptions)
+      const mos = quote?.price ? marginOfSafety(dcf.fairValuePerShare, quote.price) : null
+      const implied = quote?.price ? reverseDcf({ ...assumptions, currentPrice: quote.price }) : null
+      const computedAt = new Date()
+
+      const valuation: ValuationDoc = {
+        symbol: symbol.toUpperCase(),
+        method: 'dcf',
+        fairValuePerShare: dcf.fairValuePerShare,
+        marginOfSafetyPct: mos != null && isFinite(mos) ? mos : null,
+        impliedGrowthRate: implied?.converged ? implied.impliedGrowthRate : null,
+        assumptions,
+        computedAt,
+      }
+
+      const writes = db.batch()
+      writes.set(refs.valuation(symbol, 'dcf'), valuation)
+      writes.set(
+        refs.company(symbol),
+        {
+          dcf: {
+            fairValuePerShare: valuation.fairValuePerShare,
+            marginOfSafetyPct: valuation.marginOfSafetyPct,
+            impliedGrowthRate: valuation.impliedGrowthRate,
+            computedAt,
+          },
+        } satisfies Partial<CompanyDoc>,
+        { merge: true },
+      )
+      await writes.commit()
+
+      ctx.recordOk()
+    } catch (error) {
+      ctx.recordFailure(symbol, error)
     }
-  }
+  })
 
   return { symbols: symbols.length }
 }
@@ -387,18 +380,6 @@ export async function stageValuations(opts: StageOptions) {
 /* ------------------------------------------------------------------ *
  * helpers
  * ------------------------------------------------------------------ */
-
-/** Build an `ON CONFLICT DO UPDATE SET col = excluded.col` map without spelling
- *  out 30 identical lines per statement. */
-function buildExcludedSet(columns: string[]): Record<string, ReturnType<typeof raw>> {
-  return Object.fromEntries(
-    columns.map((c) => [toCamel(c), raw.raw(`excluded."${c}"`)]),
-  ) as Record<string, ReturnType<typeof raw>>
-}
-
-function toCamel(snake: string): string {
-  return snake.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
-}
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10)

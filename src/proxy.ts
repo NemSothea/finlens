@@ -22,13 +22,12 @@ import { isProRoute } from '@/lib/billing/entitlements'
  * file would cost a redirect, not open the paywall.
  */
 
-const SESSION_COOKIES = [
-  'authjs.session-token', // http (local dev)
-  '__Secure-authjs.session-token', // https
-]
+// Same name as SESSION_COOKIE in `@/auth` — not imported, because that module
+// pulls in firebase-admin, which has no place on the proxy's fast path.
+const SESSION_COOKIE = '__session'
 
 function hasSessionCookie(request: NextRequest): boolean {
-  return SESSION_COOKIES.some((name) => Boolean(request.cookies.get(name)?.value))
+  return Boolean(request.cookies.get(SESSION_COOKIE)?.value)
 }
 
 export function proxy(request: NextRequest) {

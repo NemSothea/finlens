@@ -10,24 +10,36 @@ client is at M2 (search on live API data) — see `finlens_mobile/README.md`.
 ## Quickstart
 
 ```bash
-# 1. Postgres. Local ports 5432/5433 were taken, so this project uses 5434.
-docker run -d --name finlens-pg \
-  -e POSTGRES_USER=finlens -e POSTGRES_PASSWORD=finlens -e POSTGRES_DB=finlens \
-  -p 5434:5432 postgres:17-alpine
+# 1. Firebase emulators (Firestore + Auth). Needs Java 21. The demo-finlens
+#    project id is offline-only; no real Firebase project or keys needed.
+#    Ports 8180/9199/4100 — the defaults are taken by another local project.
+#    Data persists to .firebase/emulator-data on exit.
+npm run emulators
 
-# 2. Env
-cp .env.example .env.local     # DATABASE_URL already points at 5434 in .env.local
+# 2. Env — see the "Firebase (local emulator)" block in .env.example
+cp .env.example .env.local
 
-# 3. Schema
-npm run db:push
-
-# 4. Data — no vendor key needed, runs against deterministic synthetic data
+# 3. Data — no vendor key needed, runs against deterministic synthetic data
 npm run ingest -- --stage=all --provider=fixture
 
+# 4. A login (admin gets /ops)
+npm run dev:user -- --email=dev@finlens.test --password=devpassword123 --admin
+
 # 5. Checks
-npm test          # 196 unit tests
+npm test          # 187 unit tests
 npm run typecheck
 ```
+
+Emulator UI (browse Firestore docs and Auth users): http://127.0.0.1:4100
+
+### Production Firebase
+
+1. Create a Firebase project; enable Authentication (Email/Password, optionally Google)
+   and Firestore.
+2. Service account key → `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`,
+   `FIREBASE_PRIVATE_KEY`; web app config → the `NEXT_PUBLIC_FIREBASE_*` vars.
+3. `npx firebase use <project-id> && npm run firebase:deploy-rules` — deploys the
+   deny-all client rules and the composite indexes the queries need.
 
 Port 3000 is occupied by another local project, so run the app on another port:
 
@@ -147,7 +159,7 @@ See `PLAN.md` §10 for the tier table and enforcement rules.
 
 ## Rules this codebase holds to
 
-- **No vendor call on the request path.** Pages read Postgres only. Cost then scales
+- **No vendor call on the request path.** Pages read Firestore only. Cost then scales
   with universe size, not user count — that is what makes a $5/mo price work.
 - **Every vendor response is zod-validated.** Vendors rename fields and return `[]`
   instead of errors; unvalidated ingest corrupts the DB silently.

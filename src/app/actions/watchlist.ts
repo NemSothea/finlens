@@ -1,12 +1,11 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { and, countDistinct, eq } from 'drizzle-orm'
 import { z } from 'zod'
-import { db } from '@/db'
-import { watchlistItems } from '@/db/schema'
+import { refs, type WatchlistItemDoc } from '@/db/schema'
 import { auth } from '@/auth'
 import { symbolsExist } from '@/lib/queries/stocks'
+import { countWatchlist } from '@/lib/queries/user'
 import { getEntitlementForUser } from '@/lib/queries/billing'
 import { checkWatchlistLimit } from '@/lib/billing/entitlements'
 
@@ -25,7 +24,8 @@ const symbolSchema = z
   .trim()
   .min(1)
   .max(12)
-  // Ticker charset: letters, digits, dot and dash (BRK-B, 7203.T).
+  // Ticker charset: letters, digits, dot and dash (BRK-B, 7203.T). Also what
+  // keeps a symbol safe to use as a document id.
   .regex(/^[A-Za-z0-9.\-]+$/, 'Not a valid ticker')
   .transform((s) => s.toUpperCase())
 
@@ -47,47 +47,42 @@ export async function addToWatchlist(input: unknown): Promise<ActionResult> {
 
   const { symbol, note, targetPrice } = parsed.data
 
-  // The table has a foreign key to companies; checking first turns a raw
-  // constraint violation into a message the user can act on.
   const known = await symbolsExist([symbol])
   if (known.size === 0) {
     return { ok: false, error: `${symbol} is not in our universe yet.` }
+  }
+
+  const itemRef = refs.watchlistItem(userId, symbol)
+
+  // Adding a symbol twice is a no-op, not an error — the user's intent
+  // ("watch this") is already satisfied. It must also not be blocked by the
+  // limit: it changes nothing, and failing it would be baffling at the boundary.
+  if ((await itemRef.get()).exists) {
+    return { ok: true }
   }
 
   // Plan limit enforced here, in the mutation — not by hiding the button. This
   // action is a public HTTP endpoint and is also what the JSON API calls.
   const entitlement = await getEntitlementForUser(userId)
   if (!entitlement.limits.watchlistSize || entitlement.limits.watchlistSize < Infinity) {
-    const [{ count }] = await db
-      .select({ count: countDistinct(watchlistItems.symbol) })
-      .from(watchlistItems)
-      .where(eq(watchlistItems.userId, userId))
-
-    // Re-adding something already watched must not be blocked by the limit —
-    // it changes nothing, and failing it would be baffling at the boundary.
-    const alreadyWatched = await db
-      .select({ id: watchlistItems.id })
-      .from(watchlistItems)
-      .where(and(eq(watchlistItems.userId, userId), eq(watchlistItems.symbol, symbol)))
-      .limit(1)
-
-    if (alreadyWatched.length === 0) {
-      const check = checkWatchlistLimit(entitlement, Number(count))
-      if (!check.allowed) return { ok: false, error: check.message ?? 'Watchlist is full.' }
-    }
+    const check = checkWatchlistLimit(entitlement, await countWatchlist(userId))
+    if (!check.allowed) return { ok: false, error: check.message ?? 'Watchlist is full.' }
   }
 
-  await db
-    .insert(watchlistItems)
-    .values({
-      userId,
-      symbol,
-      note: note ?? null,
-      targetPrice: targetPrice == null ? null : String(targetPrice),
-    })
-    // Adding a symbol twice is a no-op, not an error — the user's intent
-    // ("watch this") is already satisfied.
-    .onConflictDoNothing({ target: [watchlistItems.userId, watchlistItems.symbol] })
+  const doc: WatchlistItemDoc = {
+    symbol,
+    note: note ?? null,
+    targetPrice: targetPrice ?? null,
+    addedAt: new Date(),
+  }
+
+  try {
+    // create(), not set(): a concurrent add of the same symbol loses the race
+    // cleanly instead of overwriting the first add's timestamp.
+    await itemRef.create(doc)
+  } catch (error) {
+    if ((error as { code?: number }).code !== 6 /* ALREADY_EXISTS */) throw error
+  }
 
   revalidatePath('/watchlist')
   revalidatePath(`/stocks/${symbol}`)
@@ -104,11 +99,9 @@ export async function removeFromWatchlist(input: unknown): Promise<ActionResult>
 
   const symbol = parsed.data
 
-  // Scoped by userId as well as symbol: without it, any signed-in user could
-  // delete another account's row by guessing a ticker.
-  await db
-    .delete(watchlistItems)
-    .where(and(eq(watchlistItems.userId, userId), eq(watchlistItems.symbol, symbol)))
+  // The path is under users/{userId}, so this can only ever delete the
+  // caller's own entry.
+  await refs.watchlistItem(userId, symbol).delete()
 
   revalidatePath('/watchlist')
   revalidatePath(`/stocks/${symbol}`)
@@ -123,11 +116,7 @@ export async function toggleWatchlist(input: unknown): Promise<ActionResult> {
   const parsed = symbolSchema.safeParse(input)
   if (!parsed.success) return { ok: false, error: 'Invalid ticker' }
 
-  const [existing] = await db
-    .select({ id: watchlistItems.id })
-    .from(watchlistItems)
-    .where(and(eq(watchlistItems.userId, userId), eq(watchlistItems.symbol, parsed.data)))
-    .limit(1)
+  const existing = await refs.watchlistItem(userId, parsed.data).get()
 
-  return existing ? removeFromWatchlist(parsed.data) : addToWatchlist({ symbol: parsed.data })
+  return existing.exists ? removeFromWatchlist(parsed.data) : addToWatchlist({ symbol: parsed.data })
 }

@@ -76,7 +76,7 @@ export interface RunStagesOptions {
 
 export interface StageSummary {
   stage: StageName
-  runId: number
+  runId: string | null
   status: 'ok' | 'partial' | 'failed'
   ok: number
   failed: number
@@ -116,7 +116,7 @@ export async function runStages(options: RunStagesOptions): Promise<StageSummary
 
     summaries.push({
       stage,
-      runId: ctx?.runId ?? -1,
+      runId: ctx?.runId ?? null,
       status: fatal ? 'failed' : (ctx?.failed ?? 0) > 0 ? 'partial' : 'ok',
       ok: ctx?.ok ?? 0,
       failed: ctx?.failed ?? 0,

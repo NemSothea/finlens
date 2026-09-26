@@ -17,7 +17,7 @@ let nextId = 1
 function run(over: Partial<RunRow> & { stage: string; status: string }): RunRow {
   const startedAt = over.startedAt ?? hoursAgo(1)
   return {
-    id: nextId++,
+    id: String(nextId++),
     startedAt,
     finishedAt: over.status === 'running' ? null : (over.finishedAt ?? startedAt),
     itemsOk: 100,

@@ -6,13 +6,12 @@
  *   npm run dev:pro  -- --email=you@example.com --status=past_due --days=-3
  *
  * Stands in for the checkout flow until payments land (phase 7). It writes the
- * same `subscriptions` row a webhook will, so the entitlement path being tested
+ * same `subscriptions/{uid}` doc a webhook will, so the entitlement path being tested
  * here is exactly the one production will use.
  */
 import '@/lib/env'
-import { eq } from 'drizzle-orm'
-import { db, sql } from '@/db'
-import { subscriptions, users } from '@/db/schema'
+import { adminAuth, db } from '@/db'
+import { refs, type SubscriptionDoc } from '@/db/schema'
 import { resolveEntitlement } from '@/lib/billing/entitlements'
 
 function arg(name: string, fallback?: string): string {
@@ -37,11 +36,10 @@ async function main() {
   const status = arg('status', 'active')
   const days = Number(arg('days', '30'))
 
-  const [user] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.email, email))
-    .limit(1)
+  const user = await adminAuth
+    .getUserByEmail(email)
+    .then((u) => ({ id: u.uid }))
+    .catch(() => null)
 
   if (!user) {
     console.error(`No user with email ${email}. Create one with npm run dev:user first.`)
@@ -50,21 +48,16 @@ async function main() {
 
   const currentPeriodEnd = new Date(Date.now() + days * 86_400_000)
 
-  await db
-    .insert(subscriptions)
-    .values({
-      userId: user.id,
-      plan,
-      status,
-      provider: 'manual',
-      currentPeriodEnd,
-      cancelAtPeriodEnd: false,
-      updatedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: subscriptions.userId,
-      set: { plan, status, provider: 'manual', currentPeriodEnd, updatedAt: new Date() },
-    })
+  const doc: SubscriptionDoc = {
+    plan,
+    status,
+    provider: 'manual',
+    providerRef: null,
+    currentPeriodEnd,
+    cancelAtPeriodEnd: false,
+    updatedAt: new Date(),
+  }
+  await refs.subscription(user.id).set(doc)
 
   const entitlement = resolveEntitlement({
     plan,
@@ -76,11 +69,11 @@ async function main() {
   console.log(`${email}: plan=${plan} status=${status} until=${currentPeriodEnd.toISOString().slice(0, 10)}`)
   console.log(`  resolves to isPro=${entitlement.isPro} grace=${entitlement.inGracePeriod}`)
 
-  await sql.end()
+  await db.terminate()
 }
 
 main().catch(async (error) => {
   console.error(error)
-  await sql.end().catch(() => {})
+  await db.terminate().catch(() => {})
   process.exit(1)
 })

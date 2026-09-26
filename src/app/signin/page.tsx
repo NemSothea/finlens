@@ -6,11 +6,21 @@ export const metadata = {
   title: 'Sign in | finlens',
 }
 
-export default async function SignInPage() {
-  const session = await auth()
-  if (session?.user) redirect('/watchlist')
+/** Only same-site paths — an absolute `next` would make this an open redirect. */
+function safeNext(raw: string | string[] | undefined): string {
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return value && value.startsWith('/') && !value.startsWith('//') ? value : '/watchlist'
+}
 
-  const googleConfigured = Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET)
+export default async function SignInPage({ searchParams }: PageProps<'/signin'>) {
+  const next = safeNext((await searchParams).next)
+
+  const session = await auth()
+  if (session?.user) redirect(next)
+
+  const googleEnabled =
+    process.env.NEXT_PUBLIC_AUTH_GOOGLE_ENABLED === 'true' ||
+    Boolean(process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST)
 
   return (
     <div className="mx-auto max-w-sm space-y-6 py-10">
@@ -21,7 +31,7 @@ export default async function SignInPage() {
         </p>
       </div>
 
-      <SignInForm googleConfigured={googleConfigured} />
+      <SignInForm googleEnabled={googleEnabled} next={next} />
     </div>
   )
 }

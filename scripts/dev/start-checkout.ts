@@ -3,15 +3,14 @@
  *
  *   npm run dev:checkout -- --email=you@example.com --plan=pro_monthly
  *
- * Runs the same provider `createCheckout` and writes the same `payments` row
+ * Runs the same provider `createCheckout` and writes the same `payments` doc
  * that `startCheckout` does, minus the session lookup — so the webhook can be
  * exercised end to end from a terminal.
  */
 import '@/lib/env'
 import { randomUUID } from 'node:crypto'
-import { eq } from 'drizzle-orm'
-import { db, sql } from '@/db'
-import { payments, users } from '@/db/schema'
+import { adminAuth, db } from '@/db'
+import { refs, type PaymentDoc } from '@/db/schema'
 import { getActiveProviderName, getPaymentProvider } from '@/lib/payments/registry'
 import { PLAN_PRICES, type PlanId } from '@/lib/payments/types'
 
@@ -40,11 +39,10 @@ async function main() {
     process.exit(1)
   }
 
-  const [user] = await db
-    .select({ id: users.id, email: users.email })
-    .from(users)
-    .where(eq(users.email, email))
-    .limit(1)
+  const user = await adminAuth
+    .getUserByEmail(email)
+    .then((u) => ({ id: u.uid, email: u.email ?? null }))
+    .catch(() => null)
 
   if (!user) {
     console.error(`No user with email ${email}.`)
@@ -55,17 +53,21 @@ async function main() {
   const provider = getPaymentProvider(providerName)
   const reference = `fl_${randomUUID().replace(/-/g, '')}`
 
-  await db.insert(payments).values({
+  const payment: PaymentDoc = {
     userId: user.id,
     provider: providerName,
     reference,
+    providerRef: null,
     plan,
-    amount: String(price.amount),
+    amount: price.amount,
     currency: price.currency,
     status: 'pending',
-  })
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }
+  await refs.payment(providerName, reference).create(payment)
 
-  const baseUrl = process.env.AUTH_URL ?? 'http://localhost:3001'
+  const baseUrl = process.env.APP_URL ?? 'http://localhost:3001'
 
   const checkout = await provider.createCheckout({
     reference,
@@ -82,11 +84,11 @@ async function main() {
   console.log(`provider=${providerName} plan=${plan} amount=${price.amount}`)
   console.log(`handoff=${checkout.redirectUrl ?? checkout.formAction}`)
 
-  await sql.end()
+  await db.terminate()
 }
 
 main().catch(async (error) => {
   console.error(error)
-  await sql.end().catch(() => {})
+  await db.terminate().catch(() => {})
   process.exit(1)
 })

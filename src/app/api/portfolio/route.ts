@@ -46,10 +46,7 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const idParam = searchParams.get('portfolioId')
 
-  const portfolioId = idParam ? Number(idParam) : (await getOrCreateDefaultPortfolio(session.user.id)).id
-  if (Number.isNaN(portfolioId)) {
-    return Response.json({ error: 'portfolioId must be a number' }, { status: 400 })
-  }
+  const portfolioId = idParam ?? (await getOrCreateDefaultPortfolio(session.user.id)).id
 
   const detail = await getPortfolioDetail(session.user.id, portfolioId)
   // getPortfolioDetail scopes by userId, so "not yours" and "does not exist"
@@ -82,13 +79,20 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url)
-  const id = Number(searchParams.get('transactionId'))
+  const id = searchParams.get('transactionId')
 
-  if (!Number.isInteger(id) || id <= 0) {
-    return Response.json({ error: 'transactionId must be a positive integer' }, { status: 400 })
+  if (!id) {
+    return Response.json({ error: 'transactionId is required' }, { status: 400 })
   }
 
-  const result = await deleteTransaction({ id })
+  // portfolioId is optional for clients that only ever use the default one.
+  const session = await auth()
+  if (!session?.user?.id) return Response.json({ error: 'Unauthenticated' }, { status: 401 })
+  // Read-only lookup: a DELETE must never create a portfolio as a side effect.
+  const portfolioId =
+    searchParams.get('portfolioId') ?? (await listPortfolios(session.user.id))[0]?.id ?? 'default'
+
+  const result = await deleteTransaction({ portfolioId, id })
   if (!result.ok) return failureResponse(result.error, 404)
 
   return Response.json({ ok: true })

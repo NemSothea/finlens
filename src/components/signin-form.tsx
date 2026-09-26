@@ -1,28 +1,124 @@
 'use client'
 
-import { useActionState } from 'react'
+import { useState, useTransition } from 'react'
+import { useRouter } from 'next/navigation'
+import { FirebaseError } from 'firebase/app'
 import {
-  registerUser,
-  signInWithCredentials,
-  signInWithGoogle,
-  type AuthFormState,
-} from '@/app/actions/auth'
+  createUserWithEmailAndPassword,
+  GoogleAuthProvider,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  type UserCredential,
+} from 'firebase/auth'
+import { z } from 'zod'
+import { createServerSession, getClientAuth } from '@/lib/firebase/client'
 
-const INITIAL: AuthFormState = { error: null }
+const credentialsSchema = z.object({
+  email: z.email('Enter a valid email address').trim().toLowerCase(),
+  password: z.string().min(8, 'Password must be at least 8 characters').max(200),
+})
+
+/** One message for every credential failure. Distinguishing "no such account"
+ *  from "wrong password" turns the form into an account enumerator. */
+const WRONG_CREDENTIALS = 'Wrong email or password.'
+
+function describe(error: unknown): string {
+  if (error instanceof FirebaseError) {
+    switch (error.code) {
+      case 'auth/popup-closed-by-user':
+      case 'auth/cancelled-popup-request':
+        return 'Sign-in was cancelled.'
+      case 'auth/too-many-requests':
+        return 'Too many attempts. Try again in a few minutes.'
+      case 'auth/network-request-failed':
+        return 'Network error. Check your connection and try again.'
+      default:
+        return WRONG_CREDENTIALS
+    }
+  }
+  return 'Sign-in failed. Please try again.'
+}
 
 /**
  * One form, two submit buttons.
  *
  * Sign-in and registration take identical fields, and splitting them across two
- * pages just makes the user guess which one they need. `useActionState` keeps
- * the server's error message on screen without a client-side fetch.
+ * pages just makes the user guess which one they need.
+ *
+ * Flow: Firebase client SDK signs in → ID token → `/api/auth/session` mints the
+ * httpOnly cookie → the client SDK signs itself out again, because the cookie
+ * is the only session the app recognises.
  */
-export function SignInForm({ googleConfigured }: { googleConfigured: boolean }) {
-  const [signInState, signInAction, signingIn] = useActionState(signInWithCredentials, INITIAL)
-  const [registerState, registerAction, registering] = useActionState(registerUser, INITIAL)
+export function SignInForm({ googleEnabled, next }: { googleEnabled: boolean; next: string }) {
+  const router = useRouter()
+  const [error, setError] = useState<string | null>(null)
+  const [mode, setMode] = useState<'signin' | 'register' | 'google' | null>(null)
+  const [pending, startTransition] = useTransition()
 
-  const error = signInState.error ?? registerState.error
-  const busy = signingIn || registering
+  function finish(signInFn: () => Promise<UserCredential>, which: 'signin' | 'register' | 'google') {
+    setError(null)
+    setMode(which)
+    startTransition(async () => {
+      const auth = await getClientAuth()
+      try {
+        const credential = await signInFn()
+        await createServerSession(await credential.user.getIdToken())
+        await signOut(auth)
+        router.replace(next)
+        router.refresh()
+      } catch (e) {
+        await signOut(auth).catch(() => {})
+        setError(describe(e))
+      }
+    })
+  }
+
+  function parse(formData: FormData) {
+    const parsed = credentialsSchema.safeParse({
+      email: formData.get('email'),
+      password: formData.get('password'),
+    })
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? 'Invalid details')
+      return null
+    }
+    return parsed.data
+  }
+
+  function onSignIn(formData: FormData) {
+    const creds = parse(formData)
+    if (!creds) return
+    finish(async () => {
+      const auth = await getClientAuth()
+      return signInWithEmailAndPassword(auth, creds.email, creds.password)
+    }, 'signin')
+  }
+
+  function onRegister(formData: FormData) {
+    const creds = parse(formData)
+    if (!creds) return
+    finish(async () => {
+      const auth = await getClientAuth()
+      try {
+        return await createUserWithEmailAndPassword(auth, creds.email, creds.password)
+      } catch (e) {
+        // Existing account: behave exactly like sign-in, so "already taken"
+        // is never revealed. A wrong password fails with the generic message.
+        if (e instanceof FirebaseError && e.code === 'auth/email-already-in-use') {
+          return signInWithEmailAndPassword(auth, creds.email, creds.password)
+        }
+        throw e
+      }
+    }, 'register')
+  }
+
+  function onGoogle() {
+    finish(async () => {
+      const auth = await getClientAuth()
+      return signInWithPopup(auth, new GoogleAuthProvider())
+    }, 'google')
+  }
 
   return (
     <div className="space-y-6">
@@ -69,35 +165,35 @@ export function SignInForm({ googleConfigured }: { googleConfigured: boolean }) 
         <div className="flex gap-3">
           <button
             type="submit"
-            formAction={signInAction}
-            disabled={busy}
+            formAction={onSignIn}
+            disabled={pending}
             className="flex-1 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
           >
-            {signingIn ? 'Signing in…' : 'Sign in'}
+            {pending && mode === 'signin' ? 'Signing in…' : 'Sign in'}
           </button>
           <button
             type="submit"
-            formAction={registerAction}
-            disabled={busy}
+            formAction={onRegister}
+            disabled={pending}
             className="flex-1 rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium transition disabled:opacity-50 dark:border-zinc-700"
           >
-            {registering ? 'Creating…' : 'Create account'}
+            {pending && mode === 'register' ? 'Creating…' : 'Create account'}
           </button>
         </div>
       </form>
 
-      {googleConfigured ? (
-        <form action={signInWithGoogle}>
-          <button
-            type="submit"
-            className="w-full rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
-          >
-            Continue with Google
-          </button>
-        </form>
+      {googleEnabled ? (
+        <button
+          type="button"
+          onClick={onGoogle}
+          disabled={pending}
+          className="w-full rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+        >
+          {pending && mode === 'google' ? 'Opening Google…' : 'Continue with Google'}
+        </button>
       ) : (
         <p className="text-xs text-zinc-400">
-          Google sign-in is hidden because AUTH_GOOGLE_ID and AUTH_GOOGLE_SECRET are not set.
+          Google sign-in is hidden because NEXT_PUBLIC_AUTH_GOOGLE_ENABLED is not set.
         </p>
       )}
     </div>

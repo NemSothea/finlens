@@ -1,21 +1,33 @@
-import { and, desc, eq, isNull } from 'drizzle-orm'
-import { db } from '@/db'
-import { ingestRuns, opsAlerts } from '@/db/schema'
+import { db, toDate } from '@/db'
+import { refs, type IngestRunDoc, type OpsAlertDoc } from '@/db/schema'
 import { assessHealth, healthFingerprint, type HealthReport, type RunRow } from './health'
 import { formatAlert, sendTelegram, shouldSend } from './alerts'
 
 /**
- * The only part of the ops layer that touches Postgres.
+ * The only part of the ops layer that touches Firestore.
  *
  * `health.ts` and `alerts.ts` stay import-free of the database so the
  * assessment and the message text can be unit-tested without one — importing
- * `@/db` at module load would make every ops test need a live connection.
+ * `@/db` at module load would make every ops test need Firebase credentials.
  */
 
 /** Recent runs, newest first — the dashboard's run log and the health input. */
 export async function loadRuns(limit = 60): Promise<RunRow[]> {
-  const rows = await db.select().from(ingestRuns).orderBy(desc(ingestRuns.startedAt)).limit(limit)
-  return rows as RunRow[]
+  const snap = await refs.ingestRuns().orderBy('startedAt', 'desc').limit(limit).get()
+  return snap.docs.map((d) => {
+    const r = d.data() as IngestRunDoc
+    return {
+      id: d.id,
+      stage: r.stage,
+      status: r.status,
+      startedAt: toDate(r.startedAt) ?? new Date(0),
+      finishedAt: toDate(r.finishedAt),
+      itemsOk: r.itemsOk ?? 0,
+      itemsFailed: r.itemsFailed ?? 0,
+      vendorCalls: r.vendorCalls ?? 0,
+      errors: r.errors ?? null,
+    }
+  })
 }
 
 export async function loadHealth(now: Date = new Date()): Promise<{
@@ -42,47 +54,51 @@ export type AlertOutcome =
 export async function alertOnHealth(
   report: HealthReport,
   now: Date = new Date(),
-  baseUrl = process.env.AUTH_URL,
+  baseUrl = process.env.APP_URL,
 ): Promise<AlertOutcome> {
   const fingerprint = healthFingerprint(report)
 
   if (report.overall === 'ok') {
     // Recovery: close every open alert, and announce it once. Without this the
     // only recovery signal is silence, which looks the same as a dead alerter.
-    const open = await db.select().from(opsAlerts).where(isNull(opsAlerts.resolvedAt))
-    if (open.length === 0) return { sent: false, reason: 'healthy' }
+    const open = await refs.opsAlerts().where('resolvedAt', '==', null).get()
+    if (open.empty) return { sent: false, reason: 'healthy' }
 
     const ok = await sendTelegram(formatAlert(report, baseUrl))
 
     // Resolved either way: a failed recovery message must not leave the rows
     // open, or the next problem would look like a continuation of the old one.
-    await db.update(opsAlerts).set({ resolvedAt: now }).where(isNull(opsAlerts.resolvedAt))
+    const writes = db.batch()
+    for (const doc of open.docs) writes.update(doc.ref, { resolvedAt: now })
+    await writes.commit()
 
     return ok
       ? { sent: true, kind: 'recovery', fingerprint }
       : { sent: false, reason: 'send-failed' }
   }
 
-  const [existing] = await db
-    .select()
-    .from(opsAlerts)
-    .where(and(eq(opsAlerts.fingerprint, fingerprint), isNull(opsAlerts.resolvedAt)))
-    .limit(1)
+  const alertRef = refs.opsAlert(fingerprint)
+  const snap = await alertRef.get()
+  const stored = snap.exists ? (snap.data() as OpsAlertDoc) : null
+  // A resolved alert with the same fingerprint is a new occurrence, not a
+  // continuation — it starts its own cooldown.
+  const existing = stored && stored.resolvedAt == null ? stored : null
 
-  if (existing && !shouldSend(existing.lastSentAt, now)) {
+  if (existing && !shouldSend(toDate(existing.lastSentAt) ?? new Date(0), now)) {
     return { sent: false, reason: 'cooldown' }
   }
 
   const ok = await sendTelegram(formatAlert(report, baseUrl))
   if (!ok) return { sent: false, reason: 'send-failed' }
 
-  await db
-    .insert(opsAlerts)
-    .values({ fingerprint, firstSeenAt: now, lastSentAt: now, sends: 1, resolvedAt: null })
-    .onConflictDoUpdate({
-      target: opsAlerts.fingerprint,
-      set: { lastSentAt: now, sends: (existing?.sends ?? 0) + 1, resolvedAt: null },
-    })
+  const next: OpsAlertDoc = {
+    fingerprint,
+    firstSeenAt: existing ? (toDate(existing.firstSeenAt) ?? now) : now,
+    lastSentAt: now,
+    sends: (existing?.sends ?? 0) + 1,
+    resolvedAt: null,
+  }
+  await alertRef.set(next)
 
   return { sent: true, kind: 'problem', fingerprint }
 }

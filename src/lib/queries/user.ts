@@ -1,24 +1,23 @@
-import { db } from '@/db'
+import { db, toDate } from '@/db'
 import {
-  companies,
-  portfolios,
-  quotes,
-  transactions,
-  valuations,
-  watchlistItems,
+  refs,
+  type CompanyDoc,
+  type PortfolioDoc,
+  type TransactionDoc,
+  type WatchlistItemDoc,
 } from '@/db/schema'
-import { and, asc, desc, eq, inArray } from 'drizzle-orm'
 import { summarisePortfolio, type PortfolioSummary, type Transaction } from '@/lib/portfolio/positions'
 
 /**
- * Per-user reads. Every function takes `userId` as its first argument and
- * filters on it — ownership is enforced in the query, not by the caller
- * remembering to check. A missing WHERE here is a data leak between accounts,
- * so there is no "get by id" that does not also scope to the owner.
+ * Per-user reads. Every function takes `userId` as its first argument, and
+ * all per-user data lives under `users/{userId}/…` — ownership is part of the
+ * document path itself. There is no way to address another account's
+ * watchlist or portfolio from here, because the path would not exist under
+ * this user.
  */
 
 export interface WatchlistRow {
-  id: number
+  id: string
   symbol: string
   name: string
   sector: string | null
@@ -33,80 +32,75 @@ export interface WatchlistRow {
 }
 
 export async function getWatchlist(userId: string): Promise<WatchlistRow[]> {
-  const rows = await db
-    .select({
-      id: watchlistItems.id,
-      symbol: watchlistItems.symbol,
-      note: watchlistItems.note,
-      targetPrice: watchlistItems.targetPrice,
-      addedAt: watchlistItems.addedAt,
-      name: companies.name,
-      sector: companies.sector,
-      price: quotes.price,
-      dayChangePct: quotes.dayChangePct,
-      marketCap: quotes.marketCap,
-      fairValuePerShare: valuations.fairValuePerShare,
-      marginOfSafetyPct: valuations.marginOfSafetyPct,
-    })
-    .from(watchlistItems)
-    .innerJoin(companies, eq(companies.symbol, watchlistItems.symbol))
-    .leftJoin(quotes, eq(quotes.symbol, watchlistItems.symbol))
-    .leftJoin(
-      valuations,
-      and(eq(valuations.symbol, watchlistItems.symbol), eq(valuations.method, 'dcf')),
-    )
-    .where(eq(watchlistItems.userId, userId))
-    .orderBy(desc(watchlistItems.addedAt))
+  const items = await refs.watchlist(userId).orderBy('addedAt', 'desc').get()
+  if (items.empty) return []
 
-  return rows.map((r) => ({
-    ...r,
-    // numeric columns arrive as strings from postgres-js; convert once, here,
-    // so nothing downstream has to remember to.
-    targetPrice: r.targetPrice == null ? null : Number(r.targetPrice),
-  }))
+  // One batched read for every company — Firestore's stand-in for the join.
+  const companies = await db.getAll(...items.docs.map((d) => refs.company(d.id)))
+  const bySymbol = new Map(
+    companies.filter((c) => c.exists).map((c) => [c.id, c.data() as CompanyDoc]),
+  )
+
+  const rows: WatchlistRow[] = []
+  for (const doc of items.docs) {
+    const item = doc.data() as WatchlistItemDoc
+    const company = bySymbol.get(doc.id)
+    // Inner-join semantics: a symbol dropped from the universe entirely
+    // disappears from the list rather than rendering a nameless row.
+    if (!company) continue
+
+    rows.push({
+      id: doc.id,
+      symbol: doc.id,
+      name: company.name,
+      sector: company.sector ?? null,
+      note: item.note ?? null,
+      targetPrice: item.targetPrice ?? null,
+      addedAt: toDate(item.addedAt) ?? new Date(0),
+      price: company.quote?.price ?? null,
+      dayChangePct: company.quote?.dayChangePct ?? null,
+      marketCap: company.quote?.marketCap ?? null,
+      fairValuePerShare: company.dcf?.fairValuePerShare ?? null,
+      marginOfSafetyPct: company.dcf?.marginOfSafetyPct ?? null,
+    })
+  }
+  return rows
 }
 
 export async function isWatched(userId: string, symbol: string): Promise<boolean> {
-  const [row] = await db
-    .select({ id: watchlistItems.id })
-    .from(watchlistItems)
-    .where(
-      and(eq(watchlistItems.userId, userId), eq(watchlistItems.symbol, symbol.toUpperCase())),
-    )
-    .limit(1)
+  return (await refs.watchlistItem(userId, symbol).get()).exists
+}
 
-  return Boolean(row)
+export async function countWatchlist(userId: string): Promise<number> {
+  const agg = await refs.watchlist(userId).count().get()
+  return agg.data().count
 }
 
 export interface PortfolioRow {
-  id: number
+  id: string
   name: string
   baseCurrency: string
   createdAt: Date
 }
 
+function toPortfolioRow(id: string, p: PortfolioDoc): PortfolioRow {
+  return {
+    id,
+    name: p.name,
+    baseCurrency: p.baseCurrency,
+    createdAt: toDate(p.createdAt) ?? new Date(0),
+  }
+}
+
 export async function listPortfolios(userId: string): Promise<PortfolioRow[]> {
-  return db
-    .select({
-      id: portfolios.id,
-      name: portfolios.name,
-      baseCurrency: portfolios.baseCurrency,
-      createdAt: portfolios.createdAt,
-    })
-    .from(portfolios)
-    .where(eq(portfolios.userId, userId))
-    .orderBy(asc(portfolios.createdAt))
+  const snap = await refs.portfolios(userId).orderBy('createdAt', 'asc').get()
+  return snap.docs.map((d) => toPortfolioRow(d.id, d.data() as PortfolioDoc))
 }
 
 /** Ownership check used by every mutation before it touches a portfolio. */
-export async function ownsPortfolio(userId: string, portfolioId: number): Promise<boolean> {
-  const [row] = await db
-    .select({ id: portfolios.id })
-    .from(portfolios)
-    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
-    .limit(1)
-
-  return Boolean(row)
+export async function ownsPortfolio(userId: string, portfolioId: string): Promise<boolean> {
+  if (!isValidDocId(portfolioId)) return false
+  return (await refs.portfolio(userId, portfolioId).get()).exists
 }
 
 export interface TransactionRow extends Transaction {
@@ -116,37 +110,32 @@ export interface TransactionRow extends Transaction {
 
 export async function getTransactions(
   userId: string,
-  portfolioId: number,
+  portfolioId: string,
 ): Promise<TransactionRow[]> {
-  const rows = await db
-    .select({
-      id: transactions.id,
-      symbol: transactions.symbol,
-      kind: transactions.kind,
-      quantity: transactions.quantity,
-      pricePerShare: transactions.pricePerShare,
-      fees: transactions.fees,
-      currency: transactions.currency,
-      tradedAt: transactions.tradedAt,
-      note: transactions.note,
-    })
-    .from(transactions)
-    // Join through portfolios so ownership is part of the query itself.
-    .innerJoin(portfolios, eq(portfolios.id, transactions.portfolioId))
-    .where(and(eq(transactions.portfolioId, portfolioId), eq(portfolios.userId, userId)))
-    .orderBy(desc(transactions.tradedAt), desc(transactions.id))
+  if (!isValidDocId(portfolioId)) return []
 
-  return rows.map((r) => ({
-    id: r.id,
-    symbol: r.symbol,
-    kind: r.kind as Transaction['kind'],
-    quantity: Number(r.quantity),
-    pricePerShare: Number(r.pricePerShare),
-    fees: Number(r.fees),
-    tradedAt: r.tradedAt,
-    note: r.note,
-    currency: r.currency,
-  }))
+  const snap = await refs
+    .transactions(userId, portfolioId)
+    .orderBy('tradedAt', 'desc')
+    .orderBy('createdAt', 'desc')
+    .get()
+
+  return snap.docs.map((d) => {
+    const t = d.data() as TransactionDoc
+    const createdAt = toDate(t.createdAt) ?? new Date(0)
+    return {
+      id: d.id,
+      symbol: t.symbol,
+      kind: t.kind as Transaction['kind'],
+      quantity: Number(t.quantity),
+      pricePerShare: Number(t.pricePerShare),
+      fees: Number(t.fees),
+      tradedAt: toDate(t.tradedAt) ?? new Date(0),
+      createdAt,
+      note: t.note ?? null,
+      currency: t.currency,
+    }
+  })
 }
 
 export interface PortfolioDetail {
@@ -157,33 +146,26 @@ export interface PortfolioDetail {
 
 export async function getPortfolioDetail(
   userId: string,
-  portfolioId: number,
+  portfolioId: string,
 ): Promise<PortfolioDetail | null> {
-  const [portfolio] = await db
-    .select({
-      id: portfolios.id,
-      name: portfolios.name,
-      baseCurrency: portfolios.baseCurrency,
-      createdAt: portfolios.createdAt,
-    })
-    .from(portfolios)
-    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
-    .limit(1)
+  if (!isValidDocId(portfolioId)) return null
 
-  if (!portfolio) return null
+  const snap = await refs.portfolio(userId, portfolioId).get()
+  if (!snap.exists) return null
 
+  const portfolio = toPortfolioRow(snap.id, snap.data() as PortfolioDoc)
   const txs = await getTransactions(userId, portfolioId)
 
   const symbols = [...new Set(txs.map((t) => t.symbol.toUpperCase()))]
-
-  const priceRows = symbols.length
-    ? await db
-        .select({ symbol: quotes.symbol, price: quotes.price })
-        .from(quotes)
-        .where(inArray(quotes.symbol, symbols))
+  const companySnaps = symbols.length
+    ? await db.getAll(...symbols.map((s) => refs.company(s)), { fieldMask: ['quote.price'] })
     : []
 
-  const prices = new Map(priceRows.map((p) => [p.symbol, p.price]))
+  const prices = new Map<string, number | null>(
+    companySnaps
+      .filter((c) => c.exists)
+      .map((c) => [c.id, (c.data() as Pick<CompanyDoc, 'quote'>).quote?.price ?? null]),
+  )
 
   return { portfolio, transactions: txs, summary: summarisePortfolio(txs, prices) }
 }
@@ -194,15 +176,21 @@ export async function getOrCreateDefaultPortfolio(userId: string): Promise<Portf
   const existing = await listPortfolios(userId)
   if (existing.length > 0) return existing[0]
 
-  const [created] = await db
-    .insert(portfolios)
-    .values({ userId, name: 'My portfolio', baseCurrency: 'USD' })
-    .returning({
-      id: portfolios.id,
-      name: portfolios.name,
-      baseCurrency: portfolios.baseCurrency,
-      createdAt: portfolios.createdAt,
-    })
+  // Fixed id, created in a transaction: two tabs opening /portfolio at once
+  // must converge on one default portfolio, not create two.
+  const ref = refs.portfolio(userId, 'default')
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref)
+    if (snap.exists) return toPortfolioRow(ref.id, snap.data() as PortfolioDoc)
 
-  return created
+    const doc: PortfolioDoc = { name: 'My portfolio', baseCurrency: 'USD', createdAt: new Date() }
+    tx.create(ref, doc)
+    return toPortfolioRow(ref.id, doc)
+  })
+}
+
+/** Client-supplied ids become path segments; reject anything that could
+ *  escape the intended collection or is not an id we would have issued. */
+export function isValidDocId(id: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(id)
 }

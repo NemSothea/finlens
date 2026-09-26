@@ -203,7 +203,7 @@ export default async function PortfolioPage() {
                       <form
                         action={async () => {
                           'use server'
-                          await deleteTransaction({ id: t.id })
+                          await deleteTransaction({ portfolioId: portfolio.id, id: t.id })
                         }}
                       >
                         <button

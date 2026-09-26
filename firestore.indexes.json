@@ -1,0 +1,45 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "companies",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "isActive", "order": "ASCENDING" },
+        { "fieldPath": "marketCap", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "financials",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "isAnnual", "order": "ASCENDING" },
+        { "fieldPath": "periodEnd", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "transactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "tradedAt", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "prices",
+      "fieldPath": "bars",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "companies",
+      "fieldPath": "description",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "paymentEvents",
+      "fieldPath": "payload",
+      "indexes": []
+    }
+  ]
+}

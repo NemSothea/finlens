@@ -1,10 +1,8 @@
-import { db } from '@/db'
-import { ingestRuns } from '@/db/schema'
-import { eq } from 'drizzle-orm'
+import { refs, type IngestRunDoc } from '@/db/schema'
 import { redact } from '@/lib/providers/http'
 
 export interface RunContext {
-  runId: number
+  runId: string
   ok: number
   failed: number
   vendorCalls: number
@@ -15,7 +13,7 @@ export interface RunContext {
 }
 
 /**
- * Wraps a stage so that every run leaves a row in `ingest_runs` — including
+ * Wraps a stage so that every run leaves a doc in `ingestRuns` — including
  * crashed ones. A nightly pipeline that fails silently is the standard way
  * data products rot: the app keeps serving last week's numbers and nobody
  * notices until a user does.
@@ -28,10 +26,17 @@ export async function withRun<T>(
   stage: string,
   fn: (ctx: RunContext) => Promise<T>,
 ): Promise<{ result?: T; ctx: RunContext }> {
-  const [row] = await db
-    .insert(ingestRuns)
-    .values({ stage, status: 'running' })
-    .returning({ id: ingestRuns.id })
+  const start: IngestRunDoc = {
+    stage,
+    status: 'running',
+    startedAt: new Date(),
+    finishedAt: null,
+    itemsOk: 0,
+    itemsFailed: 0,
+    vendorCalls: 0,
+    errors: null,
+  }
+  const row = await refs.ingestRuns().add(start)
 
   const ctx: RunContext = {
     runId: row.id,
@@ -66,17 +71,14 @@ export async function withRun<T>(
 
   const status = fatal ? 'failed' : ctx.failed > 0 ? 'partial' : 'ok'
 
-  await db
-    .update(ingestRuns)
-    .set({
-      status,
-      finishedAt: new Date(),
-      itemsOk: ctx.ok,
-      itemsFailed: ctx.failed,
-      vendorCalls: ctx.vendorCalls,
-      errors: ctx.errors.length ? ctx.errors : null,
-    })
-    .where(eq(ingestRuns.id, ctx.runId))
+  await refs.ingestRuns().doc(ctx.runId).update({
+    status,
+    finishedAt: new Date(),
+    itemsOk: ctx.ok,
+    itemsFailed: ctx.failed,
+    vendorCalls: ctx.vendorCalls,
+    errors: ctx.errors.length ? ctx.errors : null,
+  })
 
   console.log(
     `[${stage}] ${status} — ok=${ctx.ok} failed=${ctx.failed} vendorCalls=${ctx.vendorCalls}`,
@@ -90,8 +92,8 @@ export async function withRun<T>(
   return { result, ctx }
 }
 
-/** Chunk helper — Postgres has a 65535 bind-parameter ceiling per statement,
- *  which a naive 2,000-row multi-column insert blows straight through. */
+/** Chunk helper — a Firestore batch commits at most 500 writes, and vendor
+ *  batch endpoints have their own caps. */
 export function chunk<T>(items: readonly T[], size: number): T[][] {
   const out: T[][] = []
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))

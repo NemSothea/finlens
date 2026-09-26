@@ -10,7 +10,7 @@ import { addTransaction } from '@/app/actions/portfolio'
  * split's "quantity" is a ratio, and a dividend's "price" is per-share cash.
  * Labelling them generically is how users enter a 2-for-1 split as 2 shares.
  */
-export function TransactionForm({ portfolioId }: { portfolioId: number }) {
+export function TransactionForm({ portfolioId }: { portfolioId: string }) {
   const [kind, setKind] = useState<'buy' | 'sell' | 'dividend' | 'split'>('buy')
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)

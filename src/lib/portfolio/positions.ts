@@ -19,7 +19,7 @@
 export type TransactionKind = 'buy' | 'sell' | 'dividend' | 'split'
 
 export interface Transaction {
-  id: number
+  id: string
   symbol: string
   kind: TransactionKind
   /** For `split`, this is the ratio (2 = 2-for-1), not a share count. */
@@ -27,6 +27,9 @@ export interface Transaction {
   pricePerShare: number
   fees: number
   tradedAt: Date
+  /** When the entry was recorded. Orders same-day trades in entry order —
+   *  Firestore ids are random, so they cannot carry that order themselves. */
+  createdAt?: Date
 }
 
 export interface Position {
@@ -88,8 +91,12 @@ export function derivePositions(transactions: Transaction[]): {
 
   const ordered = [...transactions].sort((a, b) => {
     const byTime = a.tradedAt.getTime() - b.tradedAt.getTime()
-    // Stable tiebreak on id so same-timestamp trades replay deterministically.
-    return byTime !== 0 ? byTime : a.id - b.id
+    if (byTime !== 0) return byTime
+    // Same timestamp: replay in entry order, then by id, so the result is
+    // deterministic however the rows came back.
+    const byEntry = (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0)
+    if (byEntry !== 0) return byEntry
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
   })
 
   const bySymbol = new Map<string, Position>()

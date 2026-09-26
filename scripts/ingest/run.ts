@@ -16,7 +16,7 @@
 import '@/lib/env'
 import { ALL_ORDER, isStageName, runStages } from '@/lib/ingest/pipeline'
 import type { StageName } from '@/lib/ops/policy'
-import { sql } from '@/db'
+import { db } from '@/db'
 
 function parseArgs(argv: string[]) {
   const out: Record<string, string> = {}
@@ -59,11 +59,11 @@ async function main() {
 
 main()
   .then(async () => {
-    await sql.end()
+    await db.terminate()
     process.exit(0)
   })
   .catch(async (error) => {
     console.error(error)
-    await sql.end().catch(() => {})
+    await db.terminate().catch(() => {})
     process.exit(1)
   })

@@ -1,19 +1,17 @@
 /**
- * Local development helper — create or reset a credentials user.
+ * Local development helper — create or reset an email/password user.
  *
  *   npm run dev:user -- --email=you@example.com --password=at-least-8-chars
  *   npm run dev:user -- --email=you@example.com --password=at-least-8-chars --admin
  *
- * Development only. There is no admin UI yet, and signing in through the web
- * form is a slow way to get a test account into a fresh database. `--admin`
- * sets `role='admin'`, which gates the `/ops` dashboard.
+ * Development only. Creates the Firebase Auth record, sets the `role` custom
+ * claim (which gates the `/ops` dashboard) and writes the `users/{uid}` mirror.
+ * A role change takes effect on the user's next sign-in, when a new session
+ * cookie picks up the claim.
  */
 import '@/lib/env'
-import { randomUUID } from 'node:crypto'
-import { eq } from 'drizzle-orm'
-import { db, sql } from '@/db'
-import { users } from '@/db/schema'
-import { hashPassword } from '@/lib/auth/password'
+import { adminAuth, db } from '@/db'
+import { refs, type UserDoc } from '@/db/schema'
 
 function arg(name: string, fallback?: string): string {
   const hit = process.argv.slice(2).find((a) => a.startsWith(`--${name}=`))
@@ -36,28 +34,40 @@ async function main() {
   const password = arg('password')
   const role = process.argv.includes('--admin') ? 'admin' : 'user'
 
-  const passwordHash = await hashPassword(password)
-
-  const [existing] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.email, email))
-    .limit(1)
-
-  if (existing) {
-    await db.update(users).set({ passwordHash, role }).where(eq(users.id, existing.id))
-    console.log(`Reset password for ${email} (${existing.id}), role=${role}`)
-  } else {
-    const id = randomUUID()
-    await db.insert(users).values({ id, email, passwordHash, role })
-    console.log(`Created ${email} (${id}), role=${role}`)
+  if (password.length < 8) {
+    console.error('Password must be at least 8 characters.')
+    process.exit(1)
   }
 
-  await sql.end()
+  let uid: string
+  let verb: string
+  try {
+    const existing = await adminAuth.getUserByEmail(email)
+    await adminAuth.updateUser(existing.uid, { password })
+    uid = existing.uid
+    verb = 'Reset password for'
+  } catch {
+    uid = (await adminAuth.createUser({ email, password })).uid
+    verb = 'Created'
+  }
+
+  await adminAuth.setCustomUserClaims(uid, { role })
+
+  const ref = refs.user(uid)
+  const snap = await ref.get()
+  if (snap.exists) {
+    await ref.update({ email, role })
+  } else {
+    const doc: UserDoc = { email, name: null, image: null, role, createdAt: new Date() }
+    await ref.set(doc)
+  }
+
+  console.log(`${verb} ${email} (${uid}), role=${role}`)
+  await db.terminate()
 }
 
 main().catch(async (error) => {
   console.error(error)
-  await sql.end().catch(() => {})
+  await db.terminate().catch(() => {})
   process.exit(1)
 })

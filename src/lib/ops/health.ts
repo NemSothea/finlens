@@ -15,7 +15,7 @@ import {
  */
 
 export interface RunRow {
-  id: number
+  id: string
   stage: string
   status: string
   startedAt: Date

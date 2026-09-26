@@ -2,9 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { db } from '@/db'
-import { payments, users } from '@/db/schema'
-import { eq } from 'drizzle-orm'
+import { refs, type PaymentDoc } from '@/db/schema'
 import { auth } from '@/auth'
 import { getActiveProviderName, getPaymentProvider } from '@/lib/payments/registry'
 import { PLAN_PRICES, PaymentConfigError, type PlanId } from '@/lib/payments/types'
@@ -18,9 +16,9 @@ const planSchema = z.enum(['pro_monthly', 'pro_annual'])
 /**
  * Start a purchase.
  *
- * The `payments` row is written BEFORE the user leaves for the provider. That
+ * The `payments` doc is written BEFORE the user leaves for the provider. That
  * ordering is the whole point: the webhook may arrive before the browser comes
- * back — or the browser may never come back at all — and without a row to match
+ * back — or the browser may never come back at all — and without a doc to match
  * the reference against, a completed payment has nowhere to land.
  *
  * Price comes from `PLAN_PRICES`, never from the client. A caller who could
@@ -54,23 +52,23 @@ export async function startCheckout(input: unknown): Promise<CheckoutResult> {
   // anyone probe other people's transactions through the callback URL.
   const reference = `fl_${randomUUID().replace(/-/g, '')}`
 
-  const [user] = await db
-    .select({ email: users.email })
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1)
+  const email = session?.user?.email ?? null
 
-  await db.insert(payments).values({
+  const payment: PaymentDoc = {
     userId,
     provider: providerName,
     reference,
+    providerRef: null,
     plan,
-    amount: String(price.amount),
+    amount: price.amount,
     currency: price.currency,
     status: 'pending',
-  })
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }
+  await refs.payment(providerName, reference).create(payment)
 
-  const baseUrl = process.env.AUTH_URL ?? 'http://localhost:3000'
+  const baseUrl = process.env.APP_URL ?? 'http://localhost:3000'
 
   const checkout = await provider.createCheckout({
     reference,
@@ -78,7 +76,7 @@ export async function startCheckout(input: unknown): Promise<CheckoutResult> {
     amount: price.amount,
     currency: price.currency,
     userId,
-    email: user?.email ?? null,
+    email,
     returnUrl: `${baseUrl}/pricing?checkout=${reference}`,
     callbackUrl: `${baseUrl}/api/payments/webhook/${providerName}`,
   })

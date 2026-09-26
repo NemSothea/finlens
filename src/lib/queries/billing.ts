@@ -1,7 +1,6 @@
 import { cache } from 'react'
-import { eq } from 'drizzle-orm'
-import { db } from '@/db'
-import { subscriptions } from '@/db/schema'
+import { toDate } from '@/db'
+import { refs, type SubscriptionDoc } from '@/db/schema'
 import { auth } from '@/auth'
 import {
   ANONYMOUS_ENTITLEMENT,
@@ -13,24 +12,22 @@ import {
  * Entitlement resolution.
  *
  * `cache()` dedupes within a single request: a page, its layout and three
- * child components all asking "is this user pro?" produce one query, not four.
+ * child components all asking "is this user pro?" produce one read, not four.
  * It does NOT cache across requests — a subscription change must take effect on
  * the next page load, not after a TTL.
  */
 
 export const getEntitlementForUser = cache(async (userId: string): Promise<Entitlement> => {
-  const [row] = await db
-    .select({
-      plan: subscriptions.plan,
-      status: subscriptions.status,
-      currentPeriodEnd: subscriptions.currentPeriodEnd,
-      cancelAtPeriodEnd: subscriptions.cancelAtPeriodEnd,
-    })
-    .from(subscriptions)
-    .where(eq(subscriptions.userId, userId))
-    .limit(1)
+  const snap = await refs.subscription(userId).get()
+  if (!snap.exists) return resolveEntitlement(null)
 
-  return resolveEntitlement(row ?? null)
+  const row = snap.data() as SubscriptionDoc
+  return resolveEntitlement({
+    plan: row.plan,
+    status: row.status,
+    currentPeriodEnd: toDate(row.currentPeriodEnd),
+    cancelAtPeriodEnd: row.cancelAtPeriodEnd ?? false,
+  })
 })
 
 /**
