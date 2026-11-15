@@ -49,6 +49,15 @@ describe('deriveDcfInputs', () => {
     assert.equal(result.inputs.netDebt, -800)
   })
 
+  test('counts short-term investments as cash in net debt', () => {
+    const result = deriveDcfInputs(
+      [statement({ totalDebt: 500, cashAndEquivalents: 200, shortTermInvestments: 150 })],
+      { price: 10, sharesOutstanding: 1_000 },
+    )
+    assert.ok(result.ok)
+    assert.equal(result.inputs.netDebt, 150)
+  })
+
   test('prefers the live quote share count over the statement figure', () => {
     // The statement count is as of fiscal year end and misses later buybacks.
     // Three statements so the FCF-history warning does not fire and obscure

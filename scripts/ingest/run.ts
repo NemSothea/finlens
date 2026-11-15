@@ -3,7 +3,7 @@
  *
  *   npm run ingest -- --stage=universe --limit=200
  *   npm run ingest -- --stage=profiles --symbols=AAPL,MSFT
- *   npm run ingest -- --stage=financials --symbols=AAPL --years=30
+ *   npm run ingest -- --stage=financials --symbols=AAPL --years=30 --quarters=8
  *   npm run ingest -- --stage=quotes
  *   npm run ingest -- --stage=valuations
  *   npm run ingest -- --stage=all --limit=50
@@ -50,6 +50,7 @@ async function main() {
     symbols,
     limit: args.limit ? Number(args.limit) : undefined,
     years: args.years ? Number(args.years) : undefined,
+    quarters: args.quarters ? Number(args.quarters) : undefined,
     concurrency: args.concurrency ? Number(args.concurrency) : undefined,
     // A human watching a terminal wants the first failure to stop the run, not
     // five more stages of output on top of it.

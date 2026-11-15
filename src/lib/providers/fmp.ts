@@ -10,7 +10,9 @@ import {
   type SymbolRef,
 } from './types'
 
-const BASE = 'https://financialmodelingprep.com/api/v3'
+// FMP retired `/api/v3` for subscriptions opened after Aug 2025. `/stable` takes
+// the symbol as a query parameter and renames several fields (noted below).
+const BASE = 'https://financialmodelingprep.com/stable'
 
 /**
  * Vendor payloads are validated, never trusted. Data vendors rename fields,
@@ -26,7 +28,8 @@ const str = z.coerce.string().nullable().catch(null)
 
 const symbolSchema = z.object({
   symbol: z.string(),
-  name: str,
+  name: str.optional(),
+  companyName: str.optional(),
   exchangeShortName: str.optional(),
   exchange: str.optional(),
   type: str.optional(),
@@ -35,7 +38,7 @@ const symbolSchema = z.object({
 const profileSchema = z.object({
   symbol: z.string(),
   companyName: str,
-  exchangeShortName: str,
+  exchange: str, // v3: exchangeShortName
   currency: str,
   country: str,
   sector: str,
@@ -50,7 +53,7 @@ const profileSchema = z.object({
 const incomeSchema = z.object({
   symbol: z.string(),
   date: z.string(),
-  calendarYear: str,
+  fiscalYear: str, // v3: calendarYear
   period: str,
   reportedCurrency: str,
   revenue: num,
@@ -63,7 +66,7 @@ const incomeSchema = z.object({
   incomeTaxExpense: num,
   netIncome: num,
   eps: num,
-  epsdiluted: num,
+  epsDiluted: num, // v3: epsdiluted
   weightedAverageShsOut: num,
   weightedAverageShsOutDil: num,
 })
@@ -90,7 +93,8 @@ const cashflowSchema = z.object({
   operatingCashFlow: num,
   capitalExpenditure: num,
   freeCashFlow: num,
-  dividendsPaid: num,
+  commonDividendsPaid: num.optional(), // v3: dividendsPaid
+  netDividendsPaid: num.optional(),
   commonStockRepurchased: num,
 })
 
@@ -98,13 +102,19 @@ const quoteSchema = z.object({
   symbol: z.string(),
   price: num,
   previousClose: num,
-  changesPercentage: num,
+  changePercentage: num, // v3: changesPercentage
   marketCap: num,
-  sharesOutstanding: num,
+  // `/stable/quote` dropped sharesOutstanding and pe. Shares are derived from
+  // marketCap ÷ price below; P/E is computed from statements, not trusted from
+  // the vendor.
   volume: num,
-  pe: num,
   yearHigh: num,
   yearLow: num,
+})
+
+const earningsSchema = z.object({
+  date: z.string(),
+  epsActual: num,
 })
 
 const barSchema = z.object({
@@ -113,7 +123,6 @@ const barSchema = z.object({
   high: num,
   low: num,
   close: z.coerce.number(),
-  adjClose: num,
   volume: num,
 })
 
@@ -158,7 +167,8 @@ export class FmpProvider implements MarketDataProvider {
   }
 
   async listSymbols(exchanges: string[]): Promise<SymbolRef[]> {
-    const raw = await this.get<unknown[]>('/stock/list')
+    // Restricted on the free plan (HTTP 402) — ingest with --symbols there.
+    const raw = await this.get<unknown[]>('/stock-list')
     const wanted = new Set(exchanges.map((e) => e.toUpperCase()))
 
     return raw
@@ -173,13 +183,13 @@ export class FmpProvider implements MarketDataProvider {
       })
       .map((s) => ({
         symbol: s.symbol,
-        name: s.name ?? s.symbol,
+        name: s.companyName ?? s.name ?? s.symbol,
         exchange: s.exchangeShortName ?? s.exchange ?? null,
       }))
   }
 
   async getProfile(symbol: string): Promise<CompanyProfile | null> {
-    const raw = await this.get<unknown[]>(`/profile/${encodeURIComponent(symbol)}`)
+    const raw = await this.get<unknown[]>('/profile', { symbol })
     const first = Array.isArray(raw) ? raw[0] : null
     if (!first) return null
 
@@ -190,7 +200,7 @@ export class FmpProvider implements MarketDataProvider {
     return {
       symbol: p.symbol,
       name: p.companyName ?? p.symbol,
-      exchange: p.exchangeShortName,
+      exchange: p.exchange,
       currency: p.currency,
       country: p.country,
       sector: p.sector,
@@ -221,13 +231,12 @@ export class FmpProvider implements MarketDataProvider {
     limit: number,
     period: 'annual' | 'quarter',
   ): Promise<FinancialPeriod[]> {
-    const sym = encodeURIComponent(symbol)
-    const params = { limit, period }
+    const params = { symbol, limit, period }
 
     const [incomeRaw, balanceRaw, cashRaw] = await Promise.all([
-      this.get<unknown[]>(`/income-statement/${sym}`, params),
-      this.get<unknown[]>(`/balance-sheet-statement/${sym}`, params),
-      this.get<unknown[]>(`/cash-flow-statement/${sym}`, params),
+      this.get<unknown[]>('/income-statement', params),
+      this.get<unknown[]>('/balance-sheet-statement', params),
+      this.get<unknown[]>('/cash-flow-statement', params),
     ])
 
     const byDate = <T extends { date: string }>(rows: unknown[], schema: z.ZodType<T>) => {
@@ -262,7 +271,7 @@ export class FmpProvider implements MarketDataProvider {
       out.push({
         symbol: i.symbol,
         period: normalisePeriod(i.period, period),
-        fiscalYear: Number(i.calendarYear ?? i.date.slice(0, 4)),
+        fiscalYear: Number(i.fiscalYear ?? i.date.slice(0, 4)),
         periodEnd: i.date,
         reportedCurrency: i.reportedCurrency,
 
@@ -276,7 +285,7 @@ export class FmpProvider implements MarketDataProvider {
         incomeTax: i.incomeTaxExpense,
         netIncome: i.netIncome,
         eps: i.eps,
-        epsDiluted: i.epsdiluted,
+        epsDiluted: i.epsDiluted,
         sharesBasic: i.weightedAverageShsOut,
         sharesDiluted: i.weightedAverageShsOutDil,
 
@@ -295,7 +304,7 @@ export class FmpProvider implements MarketDataProvider {
         operatingCashFlow: c?.operatingCashFlow ?? null,
         capitalExpenditure: c?.capitalExpenditure ?? null,
         freeCashFlow,
-        dividendsPaid: c?.dividendsPaid ?? null,
+        dividendsPaid: c?.commonDividendsPaid ?? c?.netDividendsPaid ?? null,
         shareBuybacks: c?.commonStockRepurchased ?? null,
       })
     }
@@ -308,40 +317,61 @@ export class FmpProvider implements MarketDataProvider {
 
     // One call per chunk, not per symbol — quotes are the highest-frequency
     // stage and batching is the difference between 20 calls and 2,000.
+    // `batch-quote` is a paid endpoint; on the free plan it answers 402 and we
+    // fall back to one `/quote` call per symbol.
     const CHUNK = 100
-    const chunks: string[][] = []
-    for (let i = 0; i < symbols.length; i += CHUNK) chunks.push(symbols.slice(i, i + CHUNK))
+    const raw: unknown[] = []
+    let batched = true
+    for (let i = 0; i < symbols.length; i += CHUNK) {
+      const chunk = symbols.slice(i, i + CHUNK)
+      if (batched) {
+        try {
+          raw.push(...((await this.get<unknown[]>('/batch-quote', { symbols: chunk.join(',') })) ?? []))
+          continue
+        } catch (error) {
+          if (!(error instanceof ProviderError && error.status === 402)) throw error
+          batched = false
+        }
+      }
+      for (const symbol of chunk) {
+        raw.push(...((await this.get<unknown[]>('/quote', { symbol })) ?? []))
+      }
+    }
 
     const results: Quote[] = []
-    for (const chunk of chunks) {
-      const raw = await this.get<unknown[]>(`/quote/${chunk.map(encodeURIComponent).join(',')}`)
-      for (const row of raw ?? []) {
-        const parsed = quoteSchema.safeParse(row)
-        if (!parsed.success) continue
-        const q = parsed.data
-        results.push({
-          symbol: q.symbol,
-          price: q.price,
-          previousClose: q.previousClose,
-          dayChangePct: q.changesPercentage,
-          marketCap: q.marketCap,
-          sharesOutstanding: q.sharesOutstanding,
-          volume: q.volume,
-          peRatio: q.pe,
-          yearHigh: q.yearHigh,
-          yearLow: q.yearLow,
-        })
-      }
+    for (const row of raw) {
+      const parsed = quoteSchema.safeParse(row)
+      if (!parsed.success) continue
+      const q = parsed.data
+      results.push({
+        symbol: q.symbol,
+        price: q.price,
+        previousClose: q.previousClose,
+        dayChangePct: q.changePercentage,
+        marketCap: q.marketCap,
+        sharesOutstanding:
+          q.marketCap != null && q.price != null && q.price > 0 ? q.marketCap / q.price : null,
+        volume: q.volume,
+        peRatio: null,
+        yearHigh: q.yearHigh,
+        yearLow: q.yearLow,
+      })
     }
     return results
   }
 
+  async getNextEarningsDate(symbol: string, today: string): Promise<string | null> {
+    // Per-symbol endpoint: the market-wide calendar is truncated on the free plan.
+    const raw = await this.get<unknown[]>('/earnings', { symbol, limit: 5 })
+    return pickNextEarningsDate(raw ?? [], today)
+  }
+
   async getDailyPrices(symbol: string, from: string): Promise<PriceBar[]> {
-    const raw = await this.get<{ historical?: unknown[] }>(
-      `/historical-price-full/${encodeURIComponent(symbol)}`,
-      { from },
-    )
-    return (raw?.historical ?? [])
+    // `/stable` returns a flat array (v3 wrapped it in `{ historical }`).
+    // Closes are split-adjusted; dividend adjustment is a separate paid-tier
+    // call, so adjClose stays null rather than being faked from close.
+    const raw = await this.get<unknown[]>('/historical-price-eod/full', { symbol, from })
+    return (raw ?? [])
       .map((r) => barSchema.safeParse(r))
       .filter((p) => p.success)
       .map((p) => ({
@@ -351,10 +381,25 @@ export class FmpProvider implements MarketDataProvider {
         high: p.data.high,
         low: p.data.low,
         close: p.data.close,
-        adjClose: p.data.adjClose,
+        adjClose: null,
         volume: p.data.volume,
       }))
   }
+}
+
+/**
+ * Earliest date on or after `today` that has no reported EPS yet. Rows arrive
+ * newest first and mix past and scheduled reports, so filter rather than take [0].
+ */
+export function pickNextEarningsDate(raw: unknown[], today: string): string | null {
+  const upcoming = raw
+    .map((r) => earningsSchema.safeParse(r))
+    .filter((p) => p.success)
+    .map((p) => p.data)
+    .filter((e) => e.date >= today && e.epsActual == null)
+    .map((e) => e.date.slice(0, 10))
+    .sort()
+  return upcoming[0] ?? null
 }
 
 function normalisePeriod(vendorPeriod: string | null, requested: 'annual' | 'quarter'): string {

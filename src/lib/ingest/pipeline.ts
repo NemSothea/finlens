@@ -69,6 +69,7 @@ export interface RunStagesOptions {
   symbols?: string[]
   limit?: number
   years?: number
+  quarters?: number
   concurrency?: number
   /** Stop at the first stage that throws. The CLI wants this; cron does not. */
   stopOnError?: boolean
@@ -103,6 +104,7 @@ export async function runStages(options: RunStagesOptions): Promise<StageSummary
         symbols: stageSymbols,
         limit: options.limit,
         years: options.years,
+        quarters: options.quarters,
         concurrency: options.concurrency,
       })
     }).catch((error) => {

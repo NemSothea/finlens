@@ -115,6 +115,9 @@ export interface MarketDataProvider {
 
   /** Daily bars from `from` (ISO date) to today. */
   getDailyPrices(symbol: string, from: string): Promise<PriceBar[]>
+
+  /** Next scheduled earnings date on or after `today` (ISO), or null if none announced. */
+  getNextEarningsDate(symbol: string, today: string): Promise<string | null>
 }
 
 /** Thrown for vendor responses that should NOT be retried (bad key, bad symbol). */

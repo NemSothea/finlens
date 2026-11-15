@@ -2,8 +2,8 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import type { Metadata } from 'next'
 import { MetricCard, SectionHeading } from '@/components/metric-card'
-import { CashFlowChart, FinancialsChart } from '@/components/financials-chart'
-import { PriceChart } from '@/components/price-chart'
+import { StatCard } from '@/components/stat-card'
+import { FundamentalsGrid } from '@/components/fundamentals-grid'
 import { DcfPanel } from '@/components/dcf-panel'
 import { WatchButton } from '@/components/watch-button'
 import { UpgradePrompt } from '@/components/upgrade-prompt'
@@ -11,7 +11,7 @@ import { getCurrentUserAndEntitlement } from '@/lib/queries/billing'
 import { isWatched } from '@/lib/queries/user'
 import { getPriceSeries, getStatements, getStockSnapshot } from '@/lib/queries/stocks'
 import { deriveDcfInputs, describeFailure } from '@/lib/valuation/inputs'
-import { ratio } from '@/lib/metrics'
+import { buildFundamentalSeries } from '@/lib/fundamentals'
 import {
   formatCurrencyCompact,
   formatMultiple,
@@ -20,7 +20,6 @@ import {
   formatPrice,
   formatSignedPercent,
   toneForSigned,
-  MISSING,
 } from '@/lib/format'
 
 export async function generateMetadata(
@@ -47,87 +46,161 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
   // user's extra years are never fetched, so they cannot be recovered from the
   // page payload or the RSC stream. Blurring rows client-side would ship the
   // data and hide it with CSS.
-  // The chart itself is capped at 2 years even on Pro so daily closes stay
-  // readable — Pro's full history is what the JSON API returns, not this widget.
-  const chartPriceDays = Math.min(365 * 2, limits.priceHistoryDays)
+  // Price chart history is capped at 10 years; the grid thins long series.
+  const chartPriceDays = Math.min(365 * 10, limits.priceHistoryDays)
 
-  const [snapshot, statements, prices, watched] = await Promise.all([
+  const [snapshot, statements, quarters, prices, watched] = await Promise.all([
     getStockSnapshot(symbol),
     getStatements(symbol, 'FY', limits.financialYears),
+    getStatements(symbol, 'Q', Math.min(40, limits.financialYears * 4)),
     getPriceSeries(symbol, chartPriceDays),
     userId ? isWatched(userId, symbol) : Promise.resolve(false),
   ])
 
   if (!snapshot) notFound()
 
-  const { company, quote, valuation, latest, metrics } = snapshot
+  const { company, quote, valuation, basis, metrics } = snapshot
   const currency = company.currency ?? 'USD'
+  const basisNote =
+    basis.kind === 'TTM'
+      ? `Trailing twelve months to ${basis.periodEnd}`
+      : basis.fiscalYear != null
+        ? `Fiscal year ${basis.fiscalYear}`
+        : 'No statements on file'
+  const span = metrics.growthYears > 0 ? `${metrics.growthYears}y` : ''
+  const returns = metrics.priceReturns
+  const dayChange =
+    quote?.price != null && quote.previousClose != null ? quote.price - quote.previousClose : null
 
   // Derived on the server so the panel's first paint is already correct — no
   // loading flash, and no assumptions round trip before the user sees a number.
   const derived = deriveDcfInputs(statements, quote)
 
-  const financialsData = statements.map((s) => ({
-    fiscalYear: s.fiscalYear,
-    revenue: s.revenue,
-    netIncome: s.netIncome,
-    ebitda: s.ebitda,
-    freeCashFlow: s.freeCashFlow,
-    netMargin: ratio(s.netIncome, s.revenue),
-  }))
-
-  const cashFlowData = statements.map((s) => ({
-    fiscalYear: s.fiscalYear,
-    operatingCashFlow: s.operatingCashFlow,
-    capitalExpenditure: s.capitalExpenditure,
-    freeCashFlow: s.freeCashFlow,
-  }))
+  const series = buildFundamentalSeries(statements, quarters)
 
   return (
     <div className="space-y-12">
       {/* ── Header ─────────────────────────────────────────────── */}
-      <section className="flex flex-wrap items-start justify-between gap-6">
-        <div className="space-y-1">
-          <div className="flex items-center gap-3">
-            <h1 className="font-mono text-2xl font-semibold tracking-tight">{company.symbol}</h1>
-            {company.exchange && (
-              <span className="rounded-full border border-zinc-200 px-2 py-0.5 text-xs text-zinc-500 dark:border-zinc-800">
-                {company.exchange}
-              </span>
-            )}
-          </div>
-          <p className="text-lg text-zinc-600 dark:text-zinc-400">{company.name}</p>
-          <p className="text-sm text-zinc-500">
-            {[company.sector, company.industry, company.country].filter(Boolean).join(' · ') ||
-              'Sector not classified'}
-          </p>
-        </div>
-
-        <div className="text-right">
-          <div className="font-mono text-3xl font-semibold">
-            {formatPrice(quote?.price, currency)}
-          </div>
-          <div
-            className={`font-mono text-sm ${toneForSigned(
-              quote?.dayChangePct == null ? null : quote.dayChangePct / 100,
-            )}`}
-          >
-            {quote?.dayChangePct == null ? MISSING : `${quote.dayChangePct.toFixed(2)}% today`}
-          </div>
-          {quote?.asOf && (
-            <div className="mt-1 text-xs text-zinc-400">
-              as of {quote.asOf.slice(0, 10)}
+      <section className="rounded-2xl border border-zinc-200 p-6 dark:border-zinc-800">
+        <div className="flex flex-wrap items-start justify-between gap-6">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h1 className="text-2xl font-semibold tracking-tight">{company.name}</h1>
+              <span className="font-mono text-sm text-zinc-500">{company.symbol}</span>
             </div>
-          )}
-
-          <div className="mt-3 flex justify-end">
-            <WatchButton
-              symbol={company.symbol}
-              initiallyWatched={watched}
-              signedIn={Boolean(userId)}
-            />
+            <div className="flex flex-wrap items-baseline gap-3">
+              <span className="font-mono text-3xl font-semibold">{formatPrice(quote?.price, currency)}</span>
+              {quote?.dayChangePct != null && (
+                <span
+                  className={`rounded-full px-2 py-0.5 font-mono text-sm ${
+                    quote.dayChangePct >= 0
+                      ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300'
+                      : 'bg-rose-50 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300'
+                  }`}
+                >
+                  {dayChange != null && `${dayChange >= 0 ? '+' : ''}${dayChange.toFixed(2)} `}(
+                  {formatSignedPercent(quote.dayChangePct / 100, 2)})
+                </span>
+              )}
+            </div>
+            {quote?.asOf && <p className="text-xs text-zinc-400">Quote as of {quote.asOf.slice(0, 10)}</p>}
           </div>
+
+          <WatchButton symbol={company.symbol} initiallyWatched={watched} signedIn={Boolean(userId)} />
         </div>
+
+        <dl className="mt-6 grid grid-cols-2 gap-4 border-t border-zinc-200 pt-4 text-sm sm:grid-cols-4 dark:border-zinc-800">
+          {[
+            ['Market cap', formatCurrencyCompact(quote?.marketCap, currency)],
+            ['Sector', company.sector ?? '—'],
+            ['Exchange', company.exchange ?? '—'],
+            ['Next earnings', company.nextEarningsDate ?? 'Not announced'],
+          ].map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">{label}</dt>
+              <dd className="mt-0.5 font-mono">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      {/* ── Key numbers ────────────────────────────────────────── */}
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <StatCard
+          title="Key margins"
+          footnote={basisNote}
+          rows={[
+            { label: 'Gross', value: formatPercent(metrics.grossMargin), hint: 'Gross profit ÷ revenue' },
+            { label: 'Operating', value: formatPercent(metrics.operatingMargin), hint: 'Operating income ÷ revenue' },
+            { label: 'Net', value: formatPercent(metrics.netMargin), hint: 'Net income ÷ revenue' },
+            { label: 'Free cash flow', value: formatPercent(metrics.fcfMargin), hint: 'Free cash flow ÷ revenue' },
+          ]}
+        />
+        <StatCard
+          title="Key ratios"
+          footnote={basisNote}
+          rows={[
+            { label: 'P/E', value: formatMultiple(quote?.peRatio), hint: 'Price ÷ diluted EPS (null on losses)' },
+            { label: 'ROE', value: formatPercent(metrics.returnOnEquity), hint: "Net income ÷ shareholders' equity" },
+            { label: 'ROIC', value: formatPercent(metrics.returnOnInvestedCapital), hint: 'After-tax operating income ÷ (debt + equity − cash)' },
+            {
+              label: 'Debt / equity',
+              value: formatMultiple(metrics.debtToEquity),
+              hint: 'Total debt ÷ equity',
+              tone: metrics.debtToEquity != null && metrics.debtToEquity > 2 ? 'text-amber-500' : undefined,
+            },
+          ]}
+        />
+        <StatCard
+          title="Balance sheet"
+          footnote={basis.periodEnd ? `As of ${basis.periodEnd}` : undefined}
+          rows={[
+            { label: 'Cash & ST inv.', value: formatCurrencyCompact(metrics.cash, currency), hint: 'Cash and equivalents + short-term investments' },
+            { label: 'Total debt', value: formatCurrencyCompact(metrics.totalDebt, currency) },
+            { label: 'Net debt', value: formatCurrencyCompact(metrics.netDebt, currency), hint: 'Total debt − cash & short-term investments. Negative = net cash.' },
+            { label: 'Current ratio', value: formatMultiple(metrics.currentRatio), hint: 'Current assets ÷ current liabilities' },
+          ]}
+        />
+        <StatCard
+          title="Growth"
+          footnote={metrics.growthYears > 0 ? `Compound annual, ${metrics.growthYears} fiscal years` : 'Not enough annual history'}
+          rows={[
+            { label: `Revenue ${span}`, value: formatPercent(metrics.revenueCagr5y), tone: toneForSigned(metrics.revenueCagr5y) },
+            { label: `Net income ${span}`, value: formatPercent(metrics.netIncomeCagr5y), tone: toneForSigned(metrics.netIncomeCagr5y) },
+            { label: `Free cash flow ${span}`, value: formatPercent(metrics.fcfCagr5y), tone: toneForSigned(metrics.fcfCagr5y) },
+            { label: 'Revenue YoY', value: formatSignedPercent(metrics.revenueYoy), tone: toneForSigned(metrics.revenueYoy) },
+          ]}
+        />
+        <StatCard
+          title="Share price return"
+          footnote={returns.asOf ? `Close ${returns.asOf}` : undefined}
+          rows={[
+            { label: 'YTD', value: formatSignedPercent(returns.ytd), tone: toneForSigned(returns.ytd) },
+            { label: '1 year', value: formatSignedPercent(returns.oneYear), tone: toneForSigned(returns.oneYear) },
+            { label: '5 years', value: formatSignedPercent(returns.fiveYear), tone: toneForSigned(returns.fiveYear) },
+            { label: '5y annualised', value: formatSignedPercent(returns.fiveYearCagr), tone: toneForSigned(returns.fiveYearCagr), hint: 'Compound annual rate of the 5-year return' },
+          ]}
+        />
+      </section>
+
+      {/* ── Fundamentals ───────────────────────────────────────── */}
+      <section>
+        <SectionHeading
+          title="Fundamental overview"
+          subtitle={`Each tile is one measure over time. ${
+            limits.financialYears < 30 ? `Your plan includes ${limits.financialYears} years of statements — Pro includes 30.` : ''
+          }`}
+        />
+        <FundamentalsGrid
+          series={series}
+          prices={prices}
+          currency={currency}
+          priceNote={
+            limits.priceHistoryDays < 365 * 10
+              ? `Chart shows up to ${Math.round(limits.priceHistoryDays / 365)} year${limits.priceHistoryDays >= 730 ? 's' : ''} of prices on your plan.`
+              : undefined
+          }
+        />
       </section>
 
       {/* ── Valuation ──────────────────────────────────────────── */}
@@ -182,71 +255,6 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
             No valuation possible for {company.symbol}. {describeFailure(derived.reason)}
           </div>
         )}
-      </section>
-
-      {/* ── Price ──────────────────────────────────────────────── */}
-      <section>
-        <SectionHeading
-          title="Price"
-          subtitle={
-            chartPriceDays < 365 * 2
-              ? `Daily closes, last ${Math.round(chartPriceDays / 365) || 1} year${chartPriceDays > 500 ? 's' : ''}. Pro shows two.`
-              : 'Daily closes, last two years.'
-          }
-        />
-        <PriceChart data={prices} fairValue={valuation?.fairValuePerShare ?? null} />
-      </section>
-
-      {/* ── Quality ────────────────────────────────────────────── */}
-      <section>
-        <SectionHeading
-          title="Quality and returns"
-          subtitle={`Latest fiscal year${latest ? ` — FY ${latest.fiscalYear}` : ''}.`}
-        />
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard label="Gross margin" value={formatPercent(metrics.grossMargin)} hint="Gross profit ÷ revenue" />
-          <MetricCard label="Operating margin" value={formatPercent(metrics.operatingMargin)} hint="Operating income ÷ revenue" />
-          <MetricCard label="Net margin" value={formatPercent(metrics.netMargin)} hint="Net income ÷ revenue" />
-          <MetricCard label="FCF margin" value={formatPercent(metrics.fcfMargin)} hint="Free cash flow ÷ revenue" />
-          <MetricCard label="Return on equity" value={formatPercent(metrics.returnOnEquity)} hint="Net income ÷ shareholders' equity" />
-          <MetricCard label="Return on assets" value={formatPercent(metrics.returnOnAssets)} hint="Net income ÷ total assets" />
-          <MetricCard label="Current ratio" value={formatMultiple(metrics.currentRatio)} hint="Current assets ÷ current liabilities" />
-          <MetricCard
-            label="Debt / equity"
-            value={formatMultiple(metrics.debtToEquity)}
-            hint="Total debt ÷ equity"
-            tone={metrics.debtToEquity != null && metrics.debtToEquity > 2 ? 'text-amber-500' : undefined}
-          />
-        </div>
-      </section>
-
-      {/* ── Growth ─────────────────────────────────────────────── */}
-      <section>
-        <SectionHeading title="Growth" subtitle="Compound annual rates over the last five fiscal years." />
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard label="Revenue CAGR 5y" value={formatPercent(metrics.revenueCagr5y)} tone={toneForSigned(metrics.revenueCagr5y)} />
-          <MetricCard label="Revenue YoY" value={formatSignedPercent(metrics.revenueYoy)} tone={toneForSigned(metrics.revenueYoy)} />
-          <MetricCard label="Net income CAGR 5y" value={formatPercent(metrics.netIncomeCagr5y)} tone={toneForSigned(metrics.netIncomeCagr5y)} />
-          <MetricCard label="Free cash flow CAGR 5y" value={formatPercent(metrics.fcfCagr5y)} tone={toneForSigned(metrics.fcfCagr5y)} />
-        </div>
-      </section>
-
-      {/* ── Charts ─────────────────────────────────────────────── */}
-      <section>
-        <SectionHeading
-          title="Financial history"
-          subtitle={
-            limits.financialYears < 30
-              ? `${statements.length} fiscal years shown. Your plan shows ${limits.financialYears} — Pro shows 30.`
-              : `${statements.length} fiscal years ingested.`
-          }
-        />
-        <FinancialsChart data={financialsData} />
-      </section>
-
-      <section>
-        <SectionHeading title="Cash flow" subtitle="Operating cash flow, capital expenditure and what is left over." />
-        <CashFlowChart data={cashFlowData} />
       </section>
 
       {/* ── Table ──────────────────────────────────────────────── */}

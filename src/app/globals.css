@@ -3,6 +3,13 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* Categorical chart series, fixed order (compare page). Validated for CVD
+   * separation against both surfaces; light slots 3–4 sit below 3:1 contrast,
+   * so every chart using them also carries a legend and a table view. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
 }
 
 @theme inline {
@@ -16,6 +23,10 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
   }
 }
 

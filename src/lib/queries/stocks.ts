@@ -1,7 +1,18 @@
 import { FieldPath } from 'firebase-admin/firestore'
 import { db, toDate } from '@/db'
 import { refs, type CompanyDoc, type FinancialStatementDoc, type PriceYearDoc } from '@/db/schema'
-import { cagr, deriveMetrics, yoyGrowth, type DerivedMetrics } from '@/lib/metrics'
+import {
+  cagrOverYears,
+  deriveMetrics,
+  liquidCash,
+  priceReturns,
+  priceToEarnings,
+  trailingTwelveMonths,
+  yoyGrowth,
+  type DerivedMetrics,
+  type PriceReturns,
+  type QuarterRow,
+} from '@/lib/metrics'
 
 /**
  * The single read layer.
@@ -74,6 +85,7 @@ export interface StatementRow {
   operatingIncome: number | null
   ebitda: number | null
   netIncome: number | null
+  incomeTax: number | null
   eps: number | null
   epsDiluted: number | null
   sharesDiluted: number | null
@@ -83,6 +95,7 @@ export interface StatementRow {
   totalCurrentAssets: number | null
   totalCurrentLiabilities: number | null
   cashAndEquivalents: number | null
+  shortTermInvestments: number | null
   operatingCashFlow: number | null
   capitalExpenditure: number | null
   freeCashFlow: number | null
@@ -98,6 +111,7 @@ function toStatementRow(f: FinancialStatementDoc): StatementRow {
     operatingIncome: f.operatingIncome ?? null,
     ebitda: f.ebitda ?? null,
     netIncome: f.netIncome ?? null,
+    incomeTax: f.incomeTax ?? null,
     eps: f.eps ?? null,
     epsDiluted: f.epsDiluted ?? null,
     sharesDiluted: f.sharesDiluted ?? null,
@@ -107,6 +121,7 @@ function toStatementRow(f: FinancialStatementDoc): StatementRow {
     totalCurrentAssets: f.totalCurrentAssets ?? null,
     totalCurrentLiabilities: f.totalCurrentLiabilities ?? null,
     cashAndEquivalents: f.cashAndEquivalents ?? null,
+    shortTermInvestments: f.shortTermInvestments ?? null,
     operatingCashFlow: f.operatingCashFlow ?? null,
     capitalExpenditure: f.capitalExpenditure ?? null,
     freeCashFlow: f.freeCashFlow ?? null,
@@ -172,6 +187,7 @@ export interface StockSnapshot {
     website: string | null
     description: string | null
     employees: number | null
+    nextEarningsDate: string | null
   }
   quote: {
     price: number | null
@@ -191,11 +207,24 @@ export interface StockSnapshot {
     computedAt: string
   } | null
   latest: StatementRow | null
+  /**
+   * Which period the ratio metrics describe: trailing twelve months when four
+   * consecutive quarters are on file, else the latest fiscal year.
+   */
+  basis: { kind: 'TTM' | 'FY'; periodEnd: string | null; fiscalYear: number | null }
   metrics: DerivedMetrics & {
+    /** Cash + short-term investments, as used for net debt. */
+    cash: number | null
+    totalDebt: number | null
+    peRatio: number | null
+    /** Kept under the old names for API compatibility; the real span is `growthYears`. */
     revenueCagr5y: number | null
     revenueYoy: number | null
     netIncomeCagr5y: number | null
     fcfCagr5y: number | null
+    /** Fiscal years the CAGR figures actually span (≤ 5). */
+    growthYears: number
+    priceReturns: PriceReturns
   }
 }
 
@@ -206,39 +235,64 @@ export interface StockSnapshot {
 export async function getStockSnapshot(symbol: string): Promise<StockSnapshot | null> {
   const sym = symbol.toUpperCase()
 
-  const [snap, statements] = await Promise.all([
+  const [snap, statements, quarters, prices] = await Promise.all([
     refs.company(sym).get(),
     getStatements(sym, 'FY', 10),
+    getStatements(sym, 'Q', 8),
+    // 5 years + slack so the 5y return has a bar on or before its start date.
+    getPriceSeries(sym, 365 * 5 + 10),
   ])
 
   if (!snap.exists) return null
   const head = snap.data() as CompanyDoc
   const latest = statements[0] ?? null
 
-  const metrics = {
-    ...deriveMetrics(
-      latest ?? {
-        revenue: null,
-        grossProfit: null,
-        operatingIncome: null,
-        ebitda: null,
-        netIncome: null,
-        totalAssets: null,
-        totalEquity: null,
-        totalDebt: null,
-        totalCurrentAssets: null,
-        totalCurrentLiabilities: null,
-        operatingCashFlow: null,
-        freeCashFlow: null,
-        sharesDiluted: null,
-      },
-      latest?.cashAndEquivalents,
-    ),
-    revenueCagr5y: cagr(statements.slice(0, 6).map((s) => s.revenue)),
-    revenueYoy: yoyGrowth(statements.map((s) => s.revenue)),
-    netIncomeCagr5y: cagr(statements.slice(0, 6).map((s) => s.netIncome)),
-    fcfCagr5y: cagr(statements.slice(0, 6).map((s) => s.freeCashFlow)),
+  const ttm = trailingTwelveMonths(quarters as QuarterRow[])
+  // TTM only when it is at least as recent as the latest annual report —
+  // stale quarters must not override a newer 10-K.
+  const useTtm = ttm != null && (latest == null || ttm.periodEnd >= latest.periodEnd)
+  const base = useTtm ? ttm : latest
+  const cash = base ? liquidCash(base.cashAndEquivalents, base.shortTermInvestments) : null
+
+  const empty = {
+    revenue: null,
+    grossProfit: null,
+    operatingIncome: null,
+    ebitda: null,
+    netIncome: null,
+    incomeTax: null,
+    totalAssets: null,
+    totalEquity: null,
+    totalDebt: null,
+    totalCurrentAssets: null,
+    totalCurrentLiabilities: null,
+    operatingCashFlow: null,
+    freeCashFlow: null,
+    sharesDiluted: null,
   }
+
+  const series = (pick: (s: StatementRow) => number | null) =>
+    statements.map((s) => ({ fiscalYear: s.fiscalYear, value: pick(s) }))
+  const revenueGrowth = cagrOverYears(series((s) => s.revenue), 5)
+
+  const price = head.quote?.price ?? null
+
+  const metrics = {
+    ...deriveMetrics(base ?? empty, cash),
+    cash,
+    totalDebt: base?.totalDebt ?? null,
+    peRatio: priceToEarnings(price, base?.epsDiluted ?? null),
+    revenueCagr5y: revenueGrowth.value,
+    revenueYoy: yoyGrowth(statements.map((s) => s.revenue)),
+    netIncomeCagr5y: cagrOverYears(series((s) => s.netIncome), 5).value,
+    fcfCagr5y: cagrOverYears(series((s) => s.freeCashFlow), 5).value,
+    growthYears: revenueGrowth.years,
+    priceReturns: priceReturns(prices),
+  }
+
+  const basis: StockSnapshot['basis'] = useTtm
+    ? { kind: 'TTM', periodEnd: ttm.periodEnd, fiscalYear: null }
+    : { kind: 'FY', periodEnd: latest?.periodEnd ?? null, fiscalYear: latest?.fiscalYear ?? null }
 
   const q = head.quote
   const dcf = head.dcf
@@ -255,6 +309,11 @@ export async function getStockSnapshot(symbol: string): Promise<StockSnapshot | 
       website: head.website ?? null,
       description: head.description ?? null,
       employees: head.employees ?? null,
+      // A date already passed is stale until the next profile refresh — hide it.
+      nextEarningsDate:
+        head.nextEarningsDate && head.nextEarningsDate >= new Date().toISOString().slice(0, 10)
+          ? head.nextEarningsDate
+          : null,
     },
     quote:
       !q || (q.price == null && q.marketCap == null)
@@ -265,7 +324,8 @@ export async function getStockSnapshot(symbol: string): Promise<StockSnapshot | 
             dayChangePct: q.dayChangePct ?? null,
             marketCap: q.marketCap ?? null,
             sharesOutstanding: q.sharesOutstanding ?? null,
-            peRatio: q.peRatio ?? null,
+            // `/stable/quote` no longer carries P/E; fall back to our own.
+            peRatio: q.peRatio ?? metrics.peRatio,
             yearHigh: q.yearHigh ?? null,
             yearLow: q.yearLow ?? null,
             asOf: toDate(q.asOf)?.toISOString() ?? null,
@@ -279,6 +339,7 @@ export async function getStockSnapshot(symbol: string): Promise<StockSnapshot | 
         }
       : null,
     latest,
+    basis,
     metrics,
   }
 }

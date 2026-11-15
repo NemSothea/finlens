@@ -20,6 +20,8 @@ export interface StageOptions {
   symbols?: string[]
   limit?: number
   years?: number
+  /** Quarterly periods to fetch alongside annual ones (feeds TTM). 0 = skip. */
+  quarters?: number
   concurrency?: number
 }
 
@@ -115,11 +117,16 @@ export async function stageProfiles(opts: StageOptions) {
         ctx.recordFailure(symbol, 'no profile returned')
         return
       }
+      // A missing earnings date must not fail the profile — it is a nice-to-have.
+      const nextEarningsDate = await provider
+        .getNextEarningsDate(symbol, new Date().toISOString().slice(0, 10))
+        .catch(() => null)
 
       await refs.company(symbol).set(
         {
           ...p,
           symbol: p.symbol.toUpperCase(),
+          nextEarningsDate,
           isActive: true,
           keywords: buildKeywords(p.symbol, p.name),
           updatedAt: new Date(),
@@ -144,6 +151,9 @@ export async function stageFinancials(opts: StageOptions) {
   const { provider, ctx } = opts
   const symbols = await resolveSymbols(opts)
   const years = opts.years ?? Number(process.env.INGEST_YEARS ?? 30)
+  // Four quarters make one TTM; eight leave room for a missing filing and a
+  // year-over-year TTM comparison. The FMP free plan caps this at 5.
+  const quarters = opts.quarters ?? Number(process.env.INGEST_QUARTERS ?? 8)
 
   await mapWithConcurrency(symbols, opts.concurrency ?? 3, async (symbol) => {
     try {
@@ -152,8 +162,10 @@ export async function stageFinancials(opts: StageOptions) {
         ctx.recordFailure(symbol, 'no annual statements returned')
         return
       }
+      const quarterly = quarters > 0 ? await provider.getQuarterlyFinancials(symbol, quarters) : []
+      const periods = [...annual, ...quarterly]
 
-      for (const batch of chunk(annual, BATCH_SIZE)) {
+      for (const batch of chunk(periods, BATCH_SIZE)) {
         const writes = db.batch()
         for (const f of batch) {
           // Doc id is the natural key (period + period end). Restatements are
@@ -170,7 +182,7 @@ export async function stageFinancials(opts: StageOptions) {
         }
         await writes.commit()
       }
-      ctx.recordOk(annual.length)
+      ctx.recordOk(periods.length)
     } catch (error) {
       ctx.recordFailure(symbol, error)
     }
@@ -303,7 +315,14 @@ export async function stageValuations(opts: StageOptions) {
           .financials(symbol)
           .where('isAnnual', '==', true)
           .orderBy('periodEnd', 'desc')
-          .select('periodEnd', 'freeCashFlow', 'totalDebt', 'cashAndEquivalents', 'sharesDiluted')
+          .select(
+            'periodEnd',
+            'freeCashFlow',
+            'totalDebt',
+            'cashAndEquivalents',
+            'shortTermInvestments',
+            'sharesDiluted',
+          )
           .get(),
         refs.company(symbol).get(),
       ])
@@ -317,6 +336,7 @@ export async function stageValuations(opts: StageOptions) {
           freeCashFlow: f.freeCashFlow ?? null,
           totalDebt: f.totalDebt ?? null,
           cashAndEquivalents: f.cashAndEquivalents ?? null,
+          shortTermInvestments: f.shortTermInvestments ?? null,
           sharesDiluted: f.sharesDiluted ?? null,
         }
       })

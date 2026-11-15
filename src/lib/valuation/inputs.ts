@@ -1,4 +1,5 @@
 import { DEFAULT_ASSUMPTIONS, normaliseFreeCashFlow, type DcfAssumptions } from './dcf'
+import { liquidCash } from '@/lib/metrics'
 
 /**
  * Derive the company-specific half of a DCF from stored fundamentals.
@@ -14,6 +15,8 @@ export interface StatementInput {
   freeCashFlow: number | null
   totalDebt: number | null
   cashAndEquivalents: number | null
+  /** Counted as cash for net debt. Optional: older callers may not carry it. */
+  shortTermInvestments?: number | null
   sharesDiluted: number | null
 }
 
@@ -100,7 +103,12 @@ export function deriveDcfInputs(
     warnings.push('Total debt is missing; net debt treated as cash only.')
   }
 
-  const netDebt = (latest?.totalDebt ?? 0) - (latest?.cashAndEquivalents ?? 0)
+  // Same definition as the metrics card and compare table: debt minus cash
+  // and short-term investments. Cash-only understated equity value for
+  // companies that park cash in treasuries (AAPL, GOOGL, MSFT).
+  const netDebt =
+    (latest?.totalDebt ?? 0) -
+    (liquidCash(latest?.cashAndEquivalents, latest?.shortTermInvestments) ?? 0)
 
   return {
     ok: true,

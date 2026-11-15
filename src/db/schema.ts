@@ -85,6 +85,8 @@ export interface CompanyDoc {
   ceo?: string | null
   employees?: number | null
   ipoDate?: string | null
+  /** Next scheduled earnings report (ISO date), refreshed with the profile. */
+  nextEarningsDate?: string | null
   /** false = delisted or dropped from our universe; we keep the history. */
   isActive: boolean
   /** Lower-cased prefixes of the ticker and of each word of the name — the

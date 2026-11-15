@@ -151,20 +151,42 @@ export class FixtureProvider implements MarketDataProvider {
     const annual = await this.getAnnualFinancials(symbol, Math.ceil(limit / 4))
     const out: FinancialPeriod[] = []
 
+    // Every flow line is a quarter of the year, so four quarters sum back to the
+    // annual statement exactly — the property TTM depends on. Balance-sheet
+    // lines are point-in-time and stay at the year-end value.
+    const FLOW_KEYS = [
+      'revenue',
+      'costOfRevenue',
+      'grossProfit',
+      'operatingExpenses',
+      'operatingIncome',
+      'ebitda',
+      'interestExpense',
+      'incomeTax',
+      'netIncome',
+      'eps',
+      'epsDiluted',
+      'operatingCashFlow',
+      'capitalExpenditure',
+      'freeCashFlow',
+      'dividendsPaid',
+      'shareBuybacks',
+    ] as const
+    const QUARTER_END = { 1: '03-31', 2: '06-30', 3: '09-30', 4: '12-31' } as const
+
     for (const year of annual) {
-      for (const q of [4, 3, 2, 1]) {
+      for (const q of [4, 3, 2, 1] as const) {
         if (out.length >= limit) return out
-        const scale = 0.25
-        out.push({
+        const row: FinancialPeriod = {
           ...year,
           period: `Q${q}`,
-          periodEnd: `${year.fiscalYear}-${String(q * 3).padStart(2, '0')}-28`,
-          revenue: year.revenue == null ? null : year.revenue * scale,
-          netIncome: year.netIncome == null ? null : year.netIncome * scale,
-          operatingCashFlow:
-            year.operatingCashFlow == null ? null : year.operatingCashFlow * scale,
-          freeCashFlow: year.freeCashFlow == null ? null : year.freeCashFlow * scale,
-        })
+          periodEnd: `${year.fiscalYear}-${QUARTER_END[q]}`,
+        }
+        for (const k of FLOW_KEYS) {
+          const v = year[k]
+          row[k] = v == null ? null : v / 4
+        }
+        out.push(row)
       }
     }
     return out
@@ -195,6 +217,13 @@ export class FixtureProvider implements MarketDataProvider {
         }
       }),
     )
+  }
+
+  async getNextEarningsDate(symbol: string, today: string): Promise<string | null> {
+    // Deterministic: 5–95 days out, from the symbol seed.
+    const d = new Date(`${today}T00:00:00Z`)
+    d.setUTCDate(d.getUTCDate() + 5 + Math.floor(this.seed(symbol) * 90))
+    return d.toISOString().slice(0, 10)
   }
 
   async getDailyPrices(symbol: string, from: string): Promise<PriceBar[]> {
