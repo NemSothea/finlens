@@ -106,6 +106,7 @@ export const TTM_FLOW_KEYS = [
   'grossProfit',
   'operatingIncome',
   'ebitda',
+  'interestExpense',
   'netIncome',
   'incomeTax',
   'eps',

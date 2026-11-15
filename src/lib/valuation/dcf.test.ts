@@ -167,3 +167,56 @@ describe('normaliseFreeCashFlow', () => {
     assert.equal(normaliseFreeCashFlow([null, null]), null)
   })
 })
+
+describe('calculateDcf — three-stage', () => {
+  const three: DcfAssumptions = { ...base, growthRate: 0.2, growthYears: 5, transitionYears: 15 }
+
+  test('projects growthYears + transitionYears periods, tagged by stage', () => {
+    const r = calculateDcf(three)
+    assert.equal(r.years.length, 20)
+    assert.deepEqual(
+      [r.years[4].stage, r.years[5].stage, r.years[19].stage],
+      [1, 2, 2],
+    )
+  })
+
+  test('holds stage 1 flat, then fades linearly to land on terminal growth', () => {
+    const r = calculateDcf(three)
+    for (let i = 0; i < 5; i++) assert.equal(r.years[i].growthRate, 0.2)
+    // Year 6: one fifteenth of the way down.
+    assert.ok(Math.abs(r.years[5].growthRate - (0.2 + (0.025 - 0.2) / 15)) < 1e-12)
+    assert.ok(Math.abs(r.years[19].growthRate - 0.025) < 1e-12)
+  })
+
+  test('terminal value is discounted from the end of the full horizon', () => {
+    const r = calculateDcf(three)
+    const last = r.years[19]
+    const tv = (last.freeCashFlow * 1.025) / (0.1 - 0.025)
+    assert.ok(Math.abs(r.terminalValue - tv) < 1e-3)
+    assert.ok(Math.abs(r.pvOfTerminalValue - tv / 1.1 ** 20) < 1e-3)
+  })
+
+  test('ignores the fade flag — the transition stage is the fade', () => {
+    const a = calculateDcf({ ...three, fade: true })
+    const b = calculateDcf({ ...three, fade: false })
+    assert.equal(a.fairValuePerShare, b.fairValuePerShare)
+  })
+
+  test('transitionYears 0 is exactly the two-stage model', () => {
+    const two = calculateDcf({ ...base, fade: true })
+    const zero = calculateDcf({ ...base, fade: true, transitionYears: 0 })
+    assert.equal(two.fairValuePerShare, zero.fairValuePerShare)
+  })
+
+  test('rejects a negative or fractional transition', () => {
+    assert.throws(() => calculateDcf({ ...three, transitionYears: -1 }), RangeError)
+    assert.throws(() => calculateDcf({ ...three, transitionYears: 1.5 }), RangeError)
+  })
+
+  test('reverse DCF solves stage-1 growth under the three-stage model', () => {
+    const price = calculateDcf(three).fairValuePerShare
+    const implied = reverseDcf({ ...three, currentPrice: price })
+    assert.ok(implied.converged)
+    assert.ok(Math.abs(implied.impliedGrowthRate - 0.2) < 1e-5)
+  })
+})

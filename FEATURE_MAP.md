@@ -137,3 +137,27 @@ TTM margins checked against SEC 10-K/10-Q (annual + current YTD − prior YTD):
 - Charts: metric chips (share price, revenue, EBITDA, net income, EPS, OCF, FCF, net margin), Quarterly/TTM/Annual and 1Y–MAX. Share price is **indexed to 100** (no dual axis). Fundamentals are grouped bars **aligned by the calendar period holding each fiscal period's midpoint** (NVDA FY2026 → CY2025), which fixes the misalignment seen in finempowr's compare chart.
 - Colours: fixed categorical slots `--series-1..4` (light + dark), validated for colour-blind separation. The light-mode contrast WARN on slots 3–4 is covered by the legend, chips and table.
 - Fixed during the live check: an unreadable tooltip in dark mode; a false "Not in our universe" with one symbol; the search box staying open after an add.
+
+## DCF upgrade (2026-11-15, phase 2 step 4)
+
+- **Starting cash flow:** TTM (four consecutive quarters, used only when at least as recent as the latest 10-K) or a 3-year FY average. TTM is the default when available.
+- **Cash flow to the firm or to equity.** This app's FCF is operating cash flow − capex, and US GAAP operating cash flow is already after interest. So:
+  - FCFF = FCF + interest × (1 − tax), discounted at the WACC, minus net debt.
+  - FCFE = FCF + net borrowing (change in total debt over the same window), discounted at the cost of equity, with no net-debt step.
+  - finempowr's FCFE ("adds net debt issuance and after-tax interest") double counts interest under this definition. We did not copy it.
+- **WACC from beta** (`src/lib/valuation/wacc.ts`): cost of equity = 4.25% risk-free + beta × 4.5% equity risk premium (both are market assumptions, set in `MARKET_ASSUMPTIONS`). Cost of debt = interest ÷ total debt, falling back to risk-free + 1.5% when interest is not reported. Tax = the effective rate, falling back to 21%. Weights use market cap and book debt. The panel shows the derivation and every clamp or fallback.
+  - Beta comes from FMP `/stable/profile` (`companies.beta`, refreshed with the profile stage).
+- **Three-stage option:** flat high growth for N years (default 5), then a linear fade to terminal growth over M years (default 15), then the perpetuity. Two-stage stays the default. The reverse DCF solves for stage-1 growth under either model.
+- **API:** `POST /api/stocks/:symbol/valuation` accepts `basis`, `flavour` and `transitionYears`. When `discountRate` is omitted, it is the derived rate.
+- **Default fair values changed** because the default base is now TTM FCFF at the WACC (it was a 3-year FCF average at a flat 10%).
+
+Live check (emulator, FMP free plan, default 8% growth):
+
+| Ticker | Beta | WACC | Cost of equity | Fair value: default (TTM FCFF, 2-stage) | Fair value: TTM FCFE, 3-stage | Price |
+|---|---|---|---|---|---|---|
+| AAPL | 1.09 | 9.08% | 9.15% | $181.40 | $174.49 | $356.27 |
+| MSFT | 1.04 | 8.71% | 8.95% | $165.42 | $250.34 | $523.88 |
+| NVDA | 2.22 | 14.09% | 14.22% | $59.94 | $82.10 | $162.85 |
+
+The page, the API and a direct script call give the same values. AAPL reports no separate interest expense, so its cost of debt uses the fallback, and the panel says so.
+NVDA's high beta drives a 14% WACC. That is plain CAPM: low fair values here come from the 8% growth default and the beta, not from a data error.

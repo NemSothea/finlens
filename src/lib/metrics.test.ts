@@ -19,6 +19,7 @@ function quarter(periodEnd: string, over: Partial<QuarterRow> = {}): QuarterRow 
     grossProfit: 40,
     operatingIncome: 30,
     ebitda: 35,
+    interestExpense: 2,
     netIncome: 20,
     incomeTax: 5,
     eps: 1,

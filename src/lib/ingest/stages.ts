@@ -13,6 +13,7 @@ import type { MarketDataProvider } from '@/lib/providers/types'
 import { chunk, type RunContext } from './runner'
 import { calculateDcf, marginOfSafety, reverseDcf } from '@/lib/valuation/dcf'
 import { deriveDcfInputs, describeFailure } from '@/lib/valuation/inputs'
+import { toStatementRow } from '@/lib/queries/stocks'
 
 export interface StageOptions {
   provider: MarketDataProvider
@@ -310,44 +311,28 @@ export async function stageValuations(opts: StageOptions) {
 
   await mapWithConcurrency(symbols, opts.concurrency ?? 8, async (symbol) => {
     try {
-      const [statementsSnap, companySnap] = await Promise.all([
-        refs
-          .financials(symbol)
-          .where('isAnnual', '==', true)
-          .orderBy('periodEnd', 'desc')
-          .select(
-            'periodEnd',
-            'freeCashFlow',
-            'totalDebt',
-            'cashAndEquivalents',
-            'shortTermInvestments',
-            'sharesDiluted',
-          )
-          .get(),
+      const [statementsSnap, quartersSnap, companySnap] = await Promise.all([
+        refs.financials(symbol).where('isAnnual', '==', true).orderBy('periodEnd', 'desc').limit(10).get(),
+        // Five quarters: four for TTM, the fifth for the year-ago debt (FCFE).
+        refs.financials(symbol).where('isAnnual', '==', false).orderBy('periodEnd', 'desc').limit(8).get(),
         refs.company(symbol).get(),
       ])
 
       if (!companySnap.exists || statementsSnap.empty) return
 
-      const history = statementsSnap.docs.map((d) => {
-        const f = d.data() as FinancialStatementDoc
-        return {
-          periodEnd: f.periodEnd,
-          freeCashFlow: f.freeCashFlow ?? null,
-          totalDebt: f.totalDebt ?? null,
-          cashAndEquivalents: f.cashAndEquivalents ?? null,
-          shortTermInvestments: f.shortTermInvestments ?? null,
-          sharesDiluted: f.sharesDiluted ?? null,
-        }
-      })
+      const history = statementsSnap.docs.map((d) => toStatementRow(d.data() as FinancialStatementDoc))
+      const quarters = quartersSnap.docs.map((d) => toStatementRow(d.data() as FinancialStatementDoc))
 
-      const q = (companySnap.data() as CompanyDoc).quote
-      const quote = q ? { price: q.price ?? null, sharesOutstanding: q.sharesOutstanding ?? null } : null
+      const company = companySnap.data() as CompanyDoc
+      const q = company.quote
+      const quote = q
+        ? { price: q.price ?? null, sharesOutstanding: q.sharesOutstanding ?? null, marketCap: q.marketCap ?? null }
+        : null
 
       // Same derivation the detail page and the valuation endpoint use.
       // Duplicating it here is how one company ends up with two different
       // fair values depending on which surface you look at.
-      const derived = deriveDcfInputs(history, quote)
+      const derived = deriveDcfInputs(history, quote, { quarters, beta: company.beta ?? null })
 
       // Skip rather than guess. A fair value built on missing inputs is worse
       // than no fair value — users act on these numbers.
@@ -368,7 +353,14 @@ export async function stageValuations(opts: StageOptions) {
         fairValuePerShare: dcf.fairValuePerShare,
         marginOfSafetyPct: mos != null && isFinite(mos) ? mos : null,
         impliedGrowthRate: implied?.converged ? implied.impliedGrowthRate : null,
-        assumptions,
+        // Which base and rate produced the number, so the cached value can be
+        // explained without re-deriving it.
+        assumptions: {
+          ...assumptions,
+          basis: derived.inputs.defaults.basis,
+          flavour: derived.inputs.defaults.flavour,
+          wacc: derived.inputs.wacc?.wacc ?? null,
+        },
         computedAt,
       }
 

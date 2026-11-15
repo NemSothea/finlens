@@ -74,7 +74,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
 
   // Derived on the server so the panel's first paint is already correct — no
   // loading flash, and no assumptions round trip before the user sees a number.
-  const derived = deriveDcfInputs(statements, quote)
+  const derived = deriveDcfInputs(statements, quote, { quarters, beta: company.beta })
 
   const series = buildFundamentalSeries(statements, quarters)
 
@@ -207,7 +207,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
       <section>
         <SectionHeading
           title="Intrinsic value"
-          subtitle="Two-stage DCF on normalised free cash flow. Move the assumptions — a fair value you cannot interrogate is not worth acting on."
+          subtitle="DCF on trailing or averaged cash flow, discounted at a WACC built from beta. Two- or three-stage, to the firm or to equity. Move the assumptions — a fair value you cannot interrogate is not worth acting on."
         />
 
         <p className="mb-4 text-xs text-zinc-500">
@@ -246,9 +246,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
             symbol={company.symbol}
             currency={currency}
             price={quote?.price ?? null}
-            initialAssumptions={derived.inputs.assumptions}
-            warnings={derived.inputs.warnings}
-            fcfYearsUsed={derived.inputs.fcfYearsUsed}
+            inputs={derived.inputs}
           />
         ) : (
           <div className="rounded-xl border border-dashed border-zinc-300 p-6 text-sm text-zinc-500 dark:border-zinc-700">

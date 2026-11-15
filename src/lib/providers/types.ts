@@ -28,6 +28,8 @@ export interface CompanyProfile {
   ceo: string | null
   employees: number | null
   ipoDate: string | null
+  /** Levered beta vs the market (vendor-computed, ~5y monthly). Feeds the WACC. */
+  beta: number | null
 }
 
 /** One reporting period, all three statements merged. Nulls are expected — no

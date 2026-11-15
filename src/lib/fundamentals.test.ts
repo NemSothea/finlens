@@ -17,6 +17,7 @@ function row(period: string, fiscalYear: number, periodEnd: string, revenue: num
     grossProfit: revenue / 2,
     operatingIncome: revenue / 4,
     ebitda: revenue / 3,
+    interestExpense: 1,
     netIncome: revenue / 5,
     incomeTax: 1,
     eps: 1,

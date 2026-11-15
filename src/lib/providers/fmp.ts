@@ -48,6 +48,7 @@ const profileSchema = z.object({
   ceo: str,
   fullTimeEmployees: str,
   ipoDate: str,
+  beta: num,
 })
 
 const incomeSchema = z.object({
@@ -210,6 +211,7 @@ export class FmpProvider implements MarketDataProvider {
       ceo: p.ceo,
       employees: p.fullTimeEmployees ? Number(p.fullTimeEmployees.replace(/\D/g, '')) || null : null,
       ipoDate: p.ipoDate,
+      beta: p.beta,
     }
   }
 

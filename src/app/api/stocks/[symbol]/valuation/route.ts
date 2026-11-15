@@ -1,14 +1,20 @@
 import type { NextRequest } from 'next/server'
 import { z } from 'zod'
-import { getQuote, getStatements, symbolsExist } from '@/lib/queries/stocks'
+import { getValuationContext } from '@/lib/queries/stocks'
 import { calculateDcf, marginOfSafety, reverseDcf } from '@/lib/valuation/dcf'
-import { deriveDcfInputs, describeFailure } from '@/lib/valuation/inputs'
+import { assumptionsFor, deriveDcfInputs, describeFailure } from '@/lib/valuation/inputs'
 import { buildSensitivityGrid, gridSupportRatio } from '@/lib/valuation/sensitivity'
 import { getCurrentEntitlement } from '@/lib/queries/billing'
 
 /**
  * POST /api/stocks/AAPL/valuation
- * body: { growthRate?, growthYears?, terminalGrowthRate?, discountRate?, fade?, baseFreeCashFlow? }
+ * body: { basis?, flavour?, growthRate?, growthYears?, transitionYears?,
+ *         terminalGrowthRate?, discountRate?, fade?, baseFreeCashFlow? }
+ *
+ * basis    'ttm' | 'average'  — starting cash flow window (default: TTM when fresh)
+ * flavour  'fcff' | 'fcfe'    — firm (WACC, less net debt) or equity (cost of equity)
+ * transitionYears > 0 switches to the three-stage model.
+ * discountRate, when omitted, is the WACC (fcff) or cost of equity (fcfe).
  *
  * Recomputes a DCF under caller-supplied assumptions. The web panel runs the
  * same pure functions in the browser for instant feedback; this endpoint exists
@@ -22,6 +28,9 @@ const bodySchema = z
     // -100% growth means the company evaporates, 100% forever is not a forecast.
     growthRate: z.number().min(-0.9).max(1).optional(),
     growthYears: z.number().int().min(1).max(30).optional(),
+    transitionYears: z.number().int().min(0).max(30).optional(),
+    basis: z.enum(['ttm', 'average']).optional(),
+    flavour: z.enum(['fcff', 'fcfe']).optional(),
     terminalGrowthRate: z.number().min(-0.05).max(0.08).optional(),
     discountRate: z.number().min(0.01).max(0.5).optional(),
     fade: z.boolean().optional(),
@@ -59,17 +68,16 @@ export async function POST(request: NextRequest, ctx: RouteContext<'/api/stocks/
     )
   }
 
-  const known = await symbolsExist([symbol])
-  if (known.size === 0) {
+  const context = await getValuationContext(symbol)
+  if (!context) {
     return Response.json({ error: `Unknown symbol: ${symbol.toUpperCase()}` }, { status: 404 })
   }
+  const { quote } = context
 
-  const [statements, quote] = await Promise.all([
-    getStatements(symbol, 'FY', 10),
-    getQuote(symbol),
-  ])
-
-  const derived = deriveDcfInputs(statements, quote)
+  const derived = deriveDcfInputs(context.annual, quote, {
+    quarters: context.quarters,
+    beta: context.beta,
+  })
   if (!derived.ok) {
     // 422, not 404 or 500: the ticker exists and the request was well formed,
     // but this company's data cannot support a DCF.
@@ -79,7 +87,26 @@ export async function POST(request: NextRequest, ctx: RouteContext<'/api/stocks/
     )
   }
 
-  const assumptions = { ...derived.inputs.assumptions, ...parsed.data }
+  const { basis: basisIn, flavour: flavourIn, ...overrides } = parsed.data
+  const choice = {
+    basis: basisIn ?? derived.inputs.defaults.basis,
+    flavour: flavourIn ?? derived.inputs.defaults.flavour,
+  }
+  const chosen = assumptionsFor(derived.inputs, choice)
+  if (!chosen) {
+    return Response.json(
+      {
+        error:
+          choice.basis === 'ttm' && !derived.inputs.bases.ttm
+            ? 'No trailing-twelve-month cash flow on file for this company; use basis "average".'
+            : 'Not enough debt history to compute free cash flow to equity for this basis.',
+        reason: 'basis-unavailable',
+      },
+      { status: 422 },
+    )
+  }
+
+  const assumptions = { ...chosen, ...overrides }
 
   // Zod bounds allow a discount rate below terminal growth in isolation; only
   // the combination is invalid, so it is checked where both are known.
@@ -100,6 +127,10 @@ export async function POST(request: NextRequest, ctx: RouteContext<'/api/stocks/
     symbol: symbol.toUpperCase(),
     price,
     assumptions,
+    basis: choice.basis,
+    flavour: choice.flavour,
+    bases: derived.inputs.bases,
+    wacc: derived.inputs.wacc,
     warnings: derived.inputs.warnings,
     fcfYearsUsed: derived.inputs.fcfYearsUsed,
     result: {

@@ -70,6 +70,7 @@ export class FixtureProvider implements MarketDataProvider {
       ceo: 'Fixture CEO',
       employees: Math.round(1_000 + r * 200_000),
       ipoDate: '1990-01-01',
+      beta: Math.round((0.7 + r * 0.9) * 100) / 100,
     }
   }
 

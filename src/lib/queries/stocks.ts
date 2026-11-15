@@ -84,6 +84,7 @@ export interface StatementRow {
   grossProfit: number | null
   operatingIncome: number | null
   ebitda: number | null
+  interestExpense: number | null
   netIncome: number | null
   incomeTax: number | null
   eps: number | null
@@ -101,7 +102,7 @@ export interface StatementRow {
   freeCashFlow: number | null
 }
 
-function toStatementRow(f: FinancialStatementDoc): StatementRow {
+export function toStatementRow(f: FinancialStatementDoc): StatementRow {
   return {
     period: f.period,
     fiscalYear: f.fiscalYear,
@@ -110,6 +111,7 @@ function toStatementRow(f: FinancialStatementDoc): StatementRow {
     grossProfit: f.grossProfit ?? null,
     operatingIncome: f.operatingIncome ?? null,
     ebitda: f.ebitda ?? null,
+    interestExpense: f.interestExpense ?? null,
     netIncome: f.netIncome ?? null,
     incomeTax: f.incomeTax ?? null,
     eps: f.eps ?? null,
@@ -188,6 +190,7 @@ export interface StockSnapshot {
     description: string | null
     employees: number | null
     nextEarningsDate: string | null
+    beta: number | null
   }
   quote: {
     price: number | null
@@ -314,6 +317,7 @@ export async function getStockSnapshot(symbol: string): Promise<StockSnapshot | 
         head.nextEarningsDate && head.nextEarningsDate >= new Date().toISOString().slice(0, 10)
           ? head.nextEarningsDate
           : null,
+      beta: head.beta ?? null,
     },
     quote:
       !q || (q.price == null && q.marketCap == null)
@@ -398,6 +402,30 @@ export async function getQuote(symbol: string) {
     sharesOutstanding: q.sharesOutstanding ?? null,
     marketCap: q.marketCap ?? null,
     asOf: toDate(q.asOf),
+  }
+}
+
+/**
+ * Everything `deriveDcfInputs` needs, for callers that are not the detail page
+ * (which already holds these from the snapshot): annual and quarterly rows,
+ * the quote and the profile beta.
+ */
+export async function getValuationContext(symbol: string) {
+  const [snap, annual, quarters] = await Promise.all([
+    refs.company(symbol).get(),
+    getStatements(symbol, 'FY', 10),
+    getStatements(symbol, 'Q', 8),
+  ])
+  if (!snap.exists) return null
+  const c = snap.data() as CompanyDoc
+  const q = c.quote
+  return {
+    annual,
+    quarters,
+    beta: c.beta ?? null,
+    quote: q
+      ? { price: q.price ?? null, sharesOutstanding: q.sharesOutstanding ?? null, marketCap: q.marketCap ?? null }
+      : null,
   }
 }
 

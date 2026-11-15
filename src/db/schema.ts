@@ -85,6 +85,8 @@ export interface CompanyDoc {
   ceo?: string | null
   employees?: number | null
   ipoDate?: string | null
+  /** Levered beta from the profile; feeds the DCF's WACC. */
+  beta?: number | null
   /** Next scheduled earnings report (ISO date), refreshed with the profile. */
   nextEarningsDate?: string | null
   /** false = delisted or dropped from our universe; we keep the history. */

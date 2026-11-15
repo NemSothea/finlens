@@ -1,5 +1,11 @@
 /**
- * Two-stage discounted cash flow.
+ * Two- or three-stage discounted cash flow.
+ *
+ *   two-stage   (transitionYears = 0): `growthYears` of growth, optionally
+ *               faded linearly to terminal, then a Gordon perpetuity.
+ *   three-stage (transitionYears > 0): `growthYears` at a constant high rate,
+ *               then `transitionYears` fading linearly to terminal, then the
+ *               perpetuity. E.g. 5 + 15 = a 20-year explicit forecast.
  *
  * Pure functions, no I/O, no DB. This is the feature users pay for, so it has
  * to be unit-testable and inspectable — every intermediate number is returned,
@@ -30,10 +36,18 @@ export interface DcfAssumptions {
    * drop to 2.5% overnight, and the cliff version overstates value badly.
    */
   fade?: boolean
+  /**
+   * Three-stage model: years after stage 1 over which growth fades linearly
+   * to terminal. 0 (default) = two-stage. When > 0, stage 1 is held flat and
+   * `fade` is ignored — the transition stage IS the fade.
+   */
+  transitionYears?: number
 }
 
 export interface DcfYear {
   year: number
+  /** 1 = high growth, 2 = transition (three-stage only). */
+  stage: 1 | 2
   growthRate: number
   freeCashFlow: number
   discountFactor: number
@@ -60,35 +74,40 @@ export const DEFAULT_ASSUMPTIONS = {
   terminalGrowthRate: 0.025,
   discountRate: 0.1,
   fade: true,
+  transitionYears: 0,
 } as const
 
+/** Defaults for the three-stage option: 5 years high growth + 15 fading = 20. */
+export const THREE_STAGE_DEFAULTS = { growthYears: 5, transitionYears: 15 } as const
+
 export function calculateDcf(input: DcfAssumptions): DcfResult {
-  const a: Required<DcfAssumptions> = { fade: DEFAULT_ASSUMPTIONS.fade, ...input }
+  const a: Required<DcfAssumptions> = {
+    fade: DEFAULT_ASSUMPTIONS.fade,
+    transitionYears: DEFAULT_ASSUMPTIONS.transitionYears,
+    ...input,
+  }
 
   validate(a)
 
   const years: DcfYear[] = []
   let fcf = a.baseFreeCashFlow
   let pvOfForecast = 0
+  const horizon = a.growthYears + a.transitionYears
 
-  for (let y = 1; y <= a.growthYears; y++) {
-    // Fade interpolates growth toward terminal across the horizon so the
-    // handoff to the perpetuity is continuous rather than a cliff.
-    const g = a.fade
-      ? a.growthRate + ((a.terminalGrowthRate - a.growthRate) * (y - 1)) / Math.max(1, a.growthYears - 1)
-      : a.growthRate
-
+  for (let y = 1; y <= horizon; y++) {
+    const stage: 1 | 2 = y <= a.growthYears ? 1 : 2
+    const g = growthInYear(a, y)
     fcf = fcf * (1 + g)
     const discountFactor = 1 / (1 + a.discountRate) ** y
     const presentValue = fcf * discountFactor
     pvOfForecast += presentValue
 
-    years.push({ year: y, growthRate: g, freeCashFlow: fcf, discountFactor, presentValue })
+    years.push({ year: y, stage, growthRate: g, freeCashFlow: fcf, discountFactor, presentValue })
   }
 
   // Gordon growth on the final forecast year's cash flow.
   const terminalValue = (fcf * (1 + a.terminalGrowthRate)) / (a.discountRate - a.terminalGrowthRate)
-  const pvOfTerminalValue = terminalValue / (1 + a.discountRate) ** a.growthYears
+  const pvOfTerminalValue = terminalValue / (1 + a.discountRate) ** horizon
 
   const enterpriseValue = pvOfForecast + pvOfTerminalValue
   const equityValue = enterpriseValue - a.netDebt
@@ -105,6 +124,25 @@ export function calculateDcf(input: DcfAssumptions): DcfResult {
     years,
     assumptions: a,
   }
+}
+
+/** Growth applied in forecast year `y` (1-based). */
+function growthInYear(a: Required<DcfAssumptions>, y: number): number {
+  const g1 = a.growthRate
+  const gT = a.terminalGrowthRate
+
+  if (a.transitionYears > 0) {
+    // Three-stage: flat stage 1, then a linear walk down that lands exactly on
+    // terminal growth in the final transition year, so the perpetuity picks up
+    // where the forecast leaves off.
+    if (y <= a.growthYears) return g1
+    const t = y - a.growthYears
+    return g1 + ((gT - g1) * t) / a.transitionYears
+  }
+
+  // Two-stage: fade interpolates growth toward terminal across the horizon so
+  // the handoff to the perpetuity is continuous rather than a cliff.
+  return a.fade ? g1 + ((gT - g1) * (y - 1)) / Math.max(1, a.growthYears - 1) : g1
 }
 
 /**
@@ -204,6 +242,9 @@ function validate(a: Required<DcfAssumptions>): void {
   }
   if (!Number.isInteger(a.growthYears) || a.growthYears < 1) {
     throw new RangeError(`growthYears must be a positive integer, got ${a.growthYears}`)
+  }
+  if (!Number.isInteger(a.transitionYears) || a.transitionYears < 0) {
+    throw new RangeError(`transitionYears must be a non-negative integer, got ${a.transitionYears}`)
   }
   if (!isFinite(a.baseFreeCashFlow)) {
     throw new RangeError('baseFreeCashFlow must be a finite number')
