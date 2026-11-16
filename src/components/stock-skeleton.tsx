@@ -5,10 +5,10 @@ import {
   LoadingShell,
   Skeleton,
   TableSkeleton,
-} from '@/components/skeleton'
+} from './skeleton'
 
 /** Mirrors the stock page block for block so nothing reflows when data lands. */
-export default function Loading() {
+export function StockPageSkeleton() {
   return (
     <LoadingShell label="Loading company">
       <div className="space-y-12">

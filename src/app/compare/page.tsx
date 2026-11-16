@@ -10,12 +10,13 @@ import { getPriceSeries, getSnapshots, getStatements, type StockSnapshot } from 
 import { buildFundamentalSeries } from '@/lib/fundamentals'
 import { pickWinner, type Better } from '@/lib/compare'
 import {
+  MISSING,
   formatCurrencyCompact,
+  formatFairValue,
   formatMultiple,
   formatPercent,
   formatPrice,
   formatSignedPercent,
-  MISSING,
 } from '@/lib/format'
 import { Reveal } from '@/components/skeleton'
 import { ensureCovered } from '@/lib/ingest/on-demand'
@@ -40,7 +41,7 @@ const ROWS: Array<{
   better?: Better
   rule?: string
 }> = [
-  { group: 'Market', label: 'Price', value: (s) => s.quote?.price ?? null, format: (v, s) => formatPrice(v, s.company.currency ?? 'USD') },
+  { group: 'Market', label: 'Price', value: (s) => s.quote?.price ?? null, format: (v, s) => formatFairValue(v, s.company.currency ?? 'USD') },
   { label: 'Market cap', value: (s) => s.quote?.marketCap ?? null, format: (v) => formatCurrencyCompact(v) },
   { label: 'P/E', value: (s) => s.quote?.peRatio ?? null, format: (v) => formatMultiple(v), better: 'lower', rule: 'Lower: less paid per dollar of earnings' },
 

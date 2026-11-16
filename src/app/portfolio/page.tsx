@@ -27,7 +27,7 @@ function PortfolioLocked() {
         Record trades and let finlens derive positions, cost basis and returns from the log —
         no spreadsheet, no manual balances.
       </p>
-      <UpgradePrompt feature="Portfolio tracking, unlimited watchlist, 30 years of financials and editable valuation assumptions" />
+      <UpgradePrompt feature="Portfolio tracking, unlimited watchlist, full financial history and editable valuation assumptions" />
     </div>
   )
 }

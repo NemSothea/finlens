@@ -14,7 +14,9 @@ import { deriveDcfInputs, describeFailure } from '@/lib/valuation/inputs'
 import { ensureCovered, type CoverageResult } from '@/lib/ingest/on-demand'
 import { buildFundamentalSeries } from '@/lib/fundamentals'
 import {
+  NOT_MEANINGFUL,
   formatCurrencyCompact,
+  formatFairValue,
   formatMultiple,
   formatNumber,
   formatPercent,
@@ -23,6 +25,10 @@ import {
   toneForSigned,
 } from '@/lib/format'
 import { Reveal } from '@/components/skeleton'
+import { StockPageSkeleton } from '@/components/stock-skeleton'
+import { Suspense } from 'react'
+import { refs } from '@/db/schema'
+import { lookupSymbol } from '@/lib/providers/sec-directory'
 
 export async function generateMetadata(
   props: PageProps<'/stocks/[symbol]'>,
@@ -39,9 +45,25 @@ export async function generateMetadata(
   }
 }
 
+/**
+ * The page answers "does this ticker exist?" BEFORE anything streams, so an
+ * unknown ticker gets a real 404 status. Everything slow — reading the
+ * company, or loading it from SEC and the vendor on a first visit — happens
+ * inside the Suspense boundary, behind the skeleton. (A route-level
+ * loading.tsx would stream first and turn every notFound() into a 200.)
+ */
 export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]'>) {
   const { symbol } = await props.params
+  if (!(await refs.company(symbol).get()).exists && !(await lookupSymbol(symbol))) notFound()
 
+  return (
+    <Suspense fallback={<StockPageSkeleton />}>
+      <StockDetail symbol={symbol} />
+    </Suspense>
+  )
+}
+
+async function StockDetail({ symbol }: { symbol: string }) {
   const { userId, entitlement } = await getCurrentUserAndEntitlement()
   const { limits } = entitlement
 
@@ -124,6 +146,13 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
               )}
             </div>
             {quote?.asOf && <p className="text-xs text-zinc-400">Quote as of {quote.asOf.slice(0, 10)}</p>}
+            {quote?.price == null && (
+              <p className="max-w-md rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                Price not available on the current data plan. Financials, history and the fair
+                value are shown; anything that needs the share price (P/E, margin of safety,
+                returns) stays blank.
+              </p>
+            )}
           </div>
 
           <WatchButton symbol={company.symbol} initiallyWatched={watched} signedIn={Boolean(userId)} />
@@ -238,7 +267,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
         <p className="mb-4 text-xs text-zinc-500">
           Trailing P/E {formatMultiple(quote?.peRatio)}
           {valuation &&
-            ` · nightly cached fair value ${formatPrice(valuation.fairValuePerShare, currency)} at ${formatSignedPercent(valuation.marginOfSafetyPct)} margin of safety, computed ${valuation.computedAt.slice(0, 10)}`}
+            ` · nightly cached fair value ${formatFairValue(valuation.fairValuePerShare, currency)} at ${formatSignedPercent(valuation.marginOfSafetyPct)} margin of safety, computed ${valuation.computedAt.slice(0, 10)}`}
         </p>
 
         {derived.ok && !limits.interactiveValuation ? (
@@ -249,8 +278,12 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <MetricCard
                 label="DCF fair value"
-                value={formatPrice(valuation?.fairValuePerShare, currency)}
-                hint="default assumptions"
+                value={formatFairValue(valuation?.fairValuePerShare, currency)}
+                hint={
+                  formatFairValue(valuation?.fairValuePerShare) === NOT_MEANINGFUL
+                    ? 'negative cash flow — a DCF does not apply'
+                    : 'default assumptions'
+                }
               />
               <MetricCard
                 label="Margin of safety"

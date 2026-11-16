@@ -131,6 +131,16 @@ interface AutocompleteHit {
   _source: { entity: string; tickers?: string }
 }
 
+/**
+ * Five-letter tickers ending in F (foreign ordinary) or Y (ADR) are the OTC
+ * naming convention — e.g. VENAF. The autocomplete reports no exchange, so
+ * this is the only filter it allows; the official ticker file filters by
+ * exchange properly, and load-on-open re-checks the exchange either way.
+ */
+export function looksOverTheCounter(symbol: string): boolean {
+  return /^[A-Z]{4}[FY]$/.test(symbol)
+}
+
 async function autocomplete(query: string): Promise<DirectoryEntry[]> {
   const raw = await get<{ hits?: { hits?: AutocompleteHit[] } }>(
     `https://efts.sec.gov/LATEST/search-index?keysTyped=${encodeURIComponent(query)}`,
@@ -139,6 +149,7 @@ async function autocomplete(query: string): Promise<DirectoryEntry[]> {
   for (const h of raw.hits?.hits ?? []) {
     const tickers = (h._source.tickers ?? '').split(',').map((t) => t.trim().toUpperCase()).filter(Boolean)
     for (const symbol of tickers) {
+      if (looksOverTheCounter(symbol)) continue
       out.push({ symbol, name: cleanCompanyName(h._source.entity), cik: h._id, exchange: null })
     }
   }

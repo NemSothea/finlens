@@ -21,6 +21,7 @@ import { Segmented } from '@/components/fundamentals-grid'
 import {
   formatCurrencyCompact,
   formatPercent,
+  formatFairValue,
   formatPrice,
   formatSignedPercent,
   toneForSigned,
@@ -196,8 +197,14 @@ export function DcfPanel({ symbol, currency, price, inputs }: DcfPanelProps) {
         <div key={`${basis}-${flavour}-${model}`} className="motion-settle grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Readout
             label="Fair value"
-            value={formatPrice(computed.result.fairValuePerShare, currency)}
-            hint={dirty ? 'your assumptions' : 'default assumptions'}
+            value={formatFairValue(computed.result.fairValuePerShare, currency)}
+            hint={
+              computed.result.fairValuePerShare <= 0
+                ? 'negative cash flow — a DCF does not apply'
+                : dirty
+                  ? 'your assumptions'
+                  : 'default assumptions'
+            }
           />
           <Readout
             label="Margin of safety"
@@ -412,7 +419,7 @@ export function DcfPanel({ symbol, currency, price, inputs }: DcfPanelProps) {
                               : `Margin of safety ${formatSignedPercent(cell.marginOfSafety)}`
                           }
                         >
-                          {cell.invalid ? MISSING : formatPrice(cell.fairValuePerShare, currency)}
+                          {cell.invalid ? MISSING : formatFairValue(cell.fairValuePerShare, currency)}
                         </td>
                       ))}
                     </tr>

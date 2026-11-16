@@ -34,6 +34,20 @@ export function formatPrice(value: number | null | undefined, currency = 'USD'):
   }).format(value)
 }
 
+/** Shown instead of a fair value that is zero or negative. */
+export const NOT_MEANINGFUL = 'n/m'
+export const NOT_MEANINGFUL_REASON =
+  'Not meaningful: the starting cash flow is negative, so a DCF gives a negative value. Use other measures for this company.'
+
+/**
+ * A DCF fair value. Zero or negative means the company is burning cash at the
+ * starting point — not "worth −$84 a share" — so it reads as n/m instead.
+ */
+export function formatFairValue(value: number | null | undefined, currency = 'USD'): string {
+  if (value != null && isFinite(value) && value <= 0) return NOT_MEANINGFUL
+  return formatPrice(value, currency)
+}
+
 /** Decimal fraction in, percent out: 0.2534 → "25.3%". */
 export function formatPercent(value: number | null | undefined, digits = 1): string {
   if (value == null || !isFinite(value)) return MISSING

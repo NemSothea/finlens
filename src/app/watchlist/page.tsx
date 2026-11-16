@@ -7,11 +7,12 @@ import { getEntitlementForUser } from '@/lib/queries/billing'
 import { SectionHeading } from '@/components/metric-card'
 import { UpgradePrompt } from '@/components/upgrade-prompt'
 import {
+  MISSING,
   formatCurrencyCompact,
+  formatFairValue,
   formatPrice,
   formatSignedPercent,
   toneForSigned,
-  MISSING,
 } from '@/lib/format'
 import { Reveal } from '@/components/skeleton'
 
@@ -86,7 +87,7 @@ export default async function WatchlistPage() {
                   <td className="max-w-xs truncate px-4 py-3 text-zinc-500">{item.name}</td>
                   <td className="px-4 py-3 text-right font-mono">{formatPrice(item.price)}</td>
                   <td className="px-4 py-3 text-right font-mono">
-                    {formatPrice(item.fairValuePerShare)}
+                    {formatFairValue(item.fairValuePerShare)}
                   </td>
                   <td
                     className={`px-4 py-3 text-right font-mono ${toneForSigned(item.marginOfSafetyPct)}`}

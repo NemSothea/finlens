@@ -67,6 +67,12 @@ export async function getWatchlist(userId: string): Promise<WatchlistRow[]> {
   return rows
 }
 
+/** Watched symbols, newest first — ids only, no company reads. */
+export async function listWatchedSymbols(userId: string): Promise<string[]> {
+  const snap = await refs.watchlist(userId).orderBy('addedAt', 'desc').select().get()
+  return snap.docs.map((d) => d.id)
+}
+
 export async function isWatched(userId: string, symbol: string): Promise<boolean> {
   return (await refs.watchlistItem(userId, symbol).get()).exists
 }

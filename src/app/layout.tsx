@@ -19,7 +19,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: 'finlens — fundamentals-first stock research',
   description:
-    'Company fundamentals, 30 years of financial history and disciplined intrinsic-value estimates for long-term investors.',
+    'Company fundamentals from SEC filings, years of financial history and disciplined intrinsic-value estimates for long-term investors.',
 }
 
 export default async function RootLayout({ children }: LayoutProps<'/'>) {
@@ -35,11 +35,12 @@ export default async function RootLayout({ children }: LayoutProps<'/'>) {
           className="border-b border-zinc-200 dark:border-zinc-800"
           style={{ viewTransitionName: 'site-header' }}
         >
-          <nav className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-            <Link href="/" className="font-mono text-sm font-semibold tracking-tight">
+          <nav className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
+            <Link href="/" className="shrink-0 font-mono text-sm font-semibold tracking-tight">
               finlens
             </Link>
-            <div className="flex items-center gap-6 text-sm text-zinc-500">
+            {/* Scrolls sideways on a phone rather than pushing the page wider. */}
+            <div className="-mr-1 flex min-w-0 items-center gap-4 overflow-x-auto whitespace-nowrap pr-1 text-sm text-zinc-500 [scrollbar-width:none] sm:gap-6">
               <Link href="/" className="transition hover:text-zinc-900 dark:hover:text-zinc-100">
                 Search
               </Link>
@@ -93,7 +94,7 @@ export default async function RootLayout({ children }: LayoutProps<'/'>) {
           </nav>
         </header>
 
-        <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">{children}</main>
+        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-10 sm:px-6">{children}</main>
 
         <footer className="border-t border-zinc-200 px-6 py-6 text-center text-xs text-zinc-400 dark:border-zinc-800">
           Data is ingested on a schedule and may be stale. Not financial advice.

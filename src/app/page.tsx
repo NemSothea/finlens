@@ -1,29 +1,29 @@
 import Link from 'next/link'
 import { SearchBox } from '@/components/search-box'
-import { getCoveredCompanies } from '@/lib/queries/stocks'
+import { auth } from '@/auth'
+import { getCompanyRows, POPULAR_SYMBOLS } from '@/lib/queries/stocks'
+import { listWatchedSymbols } from '@/lib/queries/user'
 import {
   formatCurrencyCompact,
+  formatFairValue,
   formatPrice,
+  NOT_MEANINGFUL,
+  NOT_MEANINGFUL_REASON,
   formatSignedPercent,
   toneForSigned,
   MISSING,
 } from '@/lib/format'
-import { Reveal } from '@/components/skeleton'
+import { Suspense } from 'react'
+import { LoadingShell, Reveal, Skeleton, TableSkeleton } from '@/components/skeleton'
 
 /**
- * ISR, not static. This page reads the DB, and the ingest pipeline runs
- * nightly — prerendering it once at build time would freeze the covered-company
- * table at whatever the data looked like on deploy day.
- *
- * An hour is well inside the ingest cadence and keeps the page cheap.
+ * The table is personal: your watchlist when you have one, otherwise a fixed
+ * popular list. It never lists "everything loaded", because with load-on-open
+ * that is just whatever other visitors happened to look up. Reading the session
+ * makes the page dynamic, so there is no ISR here.
  */
-export const revalidate = 3600
-
-export default async function HomePage() {
-  const covered = await getCoveredCompanies(30)
-
+export default function HomePage() {
   return (
-    <Reveal>
     <div className="space-y-12">
       <section className="space-y-6">
         <div className="max-w-2xl space-y-3">
@@ -31,8 +31,8 @@ export default async function HomePage() {
             Invest in businesses, not tickers.
           </h1>
           <p className="text-zinc-500">
-            Thirty years of financials, the ratios that matter, and a disciplined
-            intrinsic-value estimate — for every company we cover.
+            Years of financials straight from SEC filings, the ratios that matter, and a
+            disciplined intrinsic-value estimate — for any US-listed company.
           </p>
         </div>
 
@@ -41,10 +41,37 @@ export default async function HomePage() {
         </div>
       </section>
 
+      <Suspense fallback={<HomeTableSkeleton />}>
+        <HomeTable />
+      </Suspense>
+    </div>
+  )
+}
+
+/** The personal part of the page — waits on the session and Firestore, so it
+ *  streams in behind a skeleton while the search box is already usable. */
+async function HomeTable() {
+  const session = await auth()
+  const watched = session?.user?.id ? await listWatchedSymbols(session.user.id) : []
+  const showingWatchlist = watched.length > 0
+  const covered = await getCompanyRows(showingWatchlist ? watched : POPULAR_SYMBOLS)
+
+  return (
+    <Reveal>
       <section>
         <div className="mb-4 flex items-baseline justify-between">
-          <h2 className="text-lg font-semibold tracking-tight">Covered companies</h2>
-          <span className="text-sm text-zinc-500">{covered.length} in the universe</span>
+          <h2 className="text-lg font-semibold tracking-tight">
+            {showingWatchlist ? 'Your watchlist' : 'Popular companies'}
+          </h2>
+          {showingWatchlist ? (
+            <Link href="/watchlist" className="text-sm text-zinc-500 underline-offset-4 hover:underline">
+              Manage watchlist
+            </Link>
+          ) : (
+            <span className="text-sm text-zinc-500">
+              {session?.user ? 'Add companies to your watchlist to see them here' : 'Search to open any US-listed company'}
+            </span>
+          )}
         </div>
 
         {covered.length === 0 ? (
@@ -52,11 +79,9 @@ export default async function HomePage() {
           // blank table that reads as a broken page.
           <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center dark:border-zinc-700">
             <p className="text-sm text-zinc-500">
-              No companies ingested yet. Run the pipeline to populate the database:
+              Nothing loaded here yet. Search for a company above — it loads the first time you
+              open it.
             </p>
-            <code className="mt-3 inline-block rounded-lg bg-zinc-100 px-3 py-2 font-mono text-xs dark:bg-zinc-900">
-              npm run ingest -- --stage=all --provider=fixture
-            </code>
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
@@ -99,8 +124,11 @@ export default async function HomePage() {
                     <td className="px-4 py-3 text-right font-mono text-zinc-500">
                       {formatCurrencyCompact(c.marketCap)}
                     </td>
-                    <td className="px-4 py-3 text-right font-mono">
-                      {formatPrice(c.fairValuePerShare)}
+                    <td
+                      className="px-4 py-3 text-right font-mono"
+                      title={formatFairValue(c.fairValuePerShare) === NOT_MEANINGFUL ? NOT_MEANINGFUL_REASON : undefined}
+                    >
+                      {formatFairValue(c.fairValuePerShare)}
                     </td>
                     <td
                       className={`px-4 py-3 text-right font-mono ${toneForSigned(
@@ -121,7 +149,18 @@ export default async function HomePage() {
           growth fading to 2.5%, discounted at each company&apos;s WACC. Tune them on the detail page.
         </p>
       </section>
-    </div>
     </Reveal>
+  )
+}
+
+function HomeTableSkeleton() {
+  return (
+    <LoadingShell label="Loading companies">
+      <div className="mb-4 flex justify-between">
+        <Skeleton className="h-5 w-44" />
+        <Skeleton className="h-4 w-56" />
+      </div>
+      <TableSkeleton rows={7} cols={7} />
+    </LoadingShell>
   )
 }

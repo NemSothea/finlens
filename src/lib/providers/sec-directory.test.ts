@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { cleanCompanyName, isListed, normaliseExchange, rankEntries, sectorFromSic } from './sec-directory'
+import { cleanCompanyName, isListed, looksOverTheCounter, normaliseExchange, rankEntries, sectorFromSic } from './sec-directory'
 
 describe('cleanCompanyName', () => {
   test('title-cases EDGAR names and drops registration suffixes', () => {
@@ -49,5 +49,15 @@ describe('sectorFromSic', () => {
     assert.equal(sectorFromSic('6022'), 'Financials') // banks
     assert.equal(sectorFromSic('1311'), 'Energy')
     assert.equal(sectorFromSic(undefined), null)
+  })
+})
+
+describe('looksOverTheCounter', () => {
+  test('flags OTC foreign ordinaries and ADRs, not listed tickers', () => {
+    assert.ok(looksOverTheCounter('VENAF'))
+    assert.ok(looksOverTheCounter('NSRGY'))
+    assert.ok(!looksOverTheCounter('GOOGL'))
+    assert.ok(!looksOverTheCounter('META'))
+    assert.ok(!looksOverTheCounter('F'))
   })
 })

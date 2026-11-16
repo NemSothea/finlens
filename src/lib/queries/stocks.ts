@@ -414,6 +414,34 @@ export async function getCoveredCompanies(limit = 30) {
   })
 }
 
+/**
+ * Shown on the home page to signed-out visitors and to anyone with an empty
+ * watchlist. A fixed, recognisable set — not "whatever happens to be loaded",
+ * which would surface other people's lookups.
+ */
+export const POPULAR_SYMBOLS = ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA'] as const
+
+/** Home-table rows for specific symbols, in the order given. Unloaded ones are skipped. */
+export async function getCompanyRows(symbols: readonly string[]) {
+  if (symbols.length === 0) return []
+  const snaps = await db.getAll(...symbols.map((s) => refs.company(s)))
+  return snaps
+    .filter((s) => s.exists)
+    .map((s) => {
+      const c = s.data() as CompanyDoc
+      return {
+        symbol: c.symbol,
+        name: c.name,
+        sector: c.sector ?? null,
+        price: c.quote?.price ?? null,
+        dayChangePct: c.quote?.dayChangePct ?? null,
+        marketCap: c.quote?.marketCap ?? null,
+        fairValuePerShare: c.dcf?.fairValuePerShare ?? null,
+        marginOfSafetyPct: c.dcf?.marginOfSafetyPct ?? null,
+      }
+    })
+}
+
 /** Used by `generateStaticParams` and by the compare picker. */
 export async function listActiveSymbols(limit = 500): Promise<string[]> {
   const snap = await refs
