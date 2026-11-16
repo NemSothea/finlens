@@ -15,6 +15,7 @@ import {
   toneForSigned,
   MISSING,
 } from '@/lib/format'
+import { Reveal } from '@/components/skeleton'
 
 export const metadata = { title: 'Portfolio | finlens' }
 
@@ -49,6 +50,7 @@ export default async function PortfolioPage() {
   const currency = portfolio.baseCurrency
 
   return (
+    <Reveal>
     <div className="space-y-10">
       <SectionHeading
         title={portfolio.name}
@@ -226,5 +228,6 @@ export default async function PortfolioPage() {
         </p>
       </section>
     </div>
+    </Reveal>
   )
 }

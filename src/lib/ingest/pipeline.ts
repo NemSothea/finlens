@@ -12,6 +12,7 @@ import {
   type StageOptions,
 } from './stages'
 import type { StageName } from '@/lib/ops/policy'
+import { SecHistorySource } from '@/lib/providers/sec'
 
 /**
  * One way to run stages, shared by the CLI and the cron endpoint.
@@ -63,6 +64,17 @@ export function makeProvider(
   }
 }
 
+/**
+ * SEC filings extend statement history past the vendor plan's depth. On by
+ * default for real providers; off for the fixture (synthetic tickers have no
+ * filings) or with HISTORY_SOURCE=none.
+ */
+export function makeHistorySource(provider: string | undefined, onCall: () => void) {
+  const name = provider ?? process.env.INGEST_PROVIDER ?? 'fmp'
+  if (name === 'fixture' || process.env.HISTORY_SOURCE === 'none') return null
+  return new SecHistorySource({ onVendorCall: onCall })
+}
+
 export interface RunStagesOptions {
   stages: StageName[]
   provider?: string
@@ -106,6 +118,7 @@ export async function runStages(options: RunStagesOptions): Promise<StageSummary
         years: options.years,
         quarters: options.quarters,
         concurrency: options.concurrency,
+        history: makeHistorySource(options.provider, () => context.countVendorCall()),
       })
     }).catch((error) => {
       // `withRun` has already written the failed row and logged the error; it

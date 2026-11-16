@@ -13,6 +13,7 @@ import {
   toneForSigned,
   MISSING,
 } from '@/lib/format'
+import { Reveal } from '@/components/skeleton'
 
 export const metadata = { title: 'Watchlist | finlens' }
 
@@ -29,6 +30,7 @@ export default async function WatchlistPage() {
   const atLimit = items.length >= limit
 
   return (
+    <Reveal>
     <div className="space-y-6">
       <SectionHeading
         title="Watchlist"
@@ -126,5 +128,6 @@ export default async function WatchlistPage() {
         </p>
       )}
     </div>
+    </Reveal>
   )
 }

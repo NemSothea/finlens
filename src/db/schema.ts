@@ -18,6 +18,8 @@ import { db, safeId } from './index'
  *   payments/{hash(provider, reference)}
  *   paymentEvents/{hash(provider, eventId)} webhook idempotency ledger
  *   ingestRuns/{auto}
+ *   benchmarks/{symbol}                     { monthly: {'YYYY-MM': close} } for beta
+ *   usage/{counter_YYYY-MM-DD}              daily budgets (on-demand loads)
  *   opsAlerts/{hash(fingerprint)}
  *
  * Why the quote and DCF summary live inside the company doc: Firestore has no
@@ -45,6 +47,8 @@ export const COLLECTIONS = {
   paymentEvents: 'paymentEvents',
   ingestRuns: 'ingestRuns',
   opsAlerts: 'opsAlerts',
+  benchmarks: 'benchmarks',
+  usage: 'usage',
 } as const
 
 /* ------------------------------------------------------------------ *
@@ -85,8 +89,14 @@ export interface CompanyDoc {
   ceo?: string | null
   employees?: number | null
   ipoDate?: string | null
-  /** Levered beta from the profile; feeds the DCF's WACC. */
+  /** Levered beta; feeds the DCF's WACC. Computed from 5y monthly returns vs
+   *  SPY when enough prices exist (`betaSource: 'computed'`), else the vendor's. */
   beta?: number | null
+  betaSource?: 'vendor' | 'computed' | null
+  /** Where the profile came from: SEC submissions or the market-data vendor. */
+  profileSource?: string | null
+  /** SEC Central Index Key (digits, unpadded), from the profile. */
+  cik?: string | null
   /** Next scheduled earnings report (ISO date), refreshed with the profile. */
   nextEarningsDate?: string | null
   /** false = delisted or dropped from our universe; we keep the history. */
@@ -340,6 +350,10 @@ export const refs = {
   ingestRuns: () => db.collection(COLLECTIONS.ingestRuns),
   opsAlerts: () => db.collection(COLLECTIONS.opsAlerts),
   opsAlert: (fingerprint: string) => db.collection(COLLECTIONS.opsAlerts).doc(safeId(fingerprint)),
+  /** Market series used across companies, e.g. SPY monthly closes for beta. */
+  benchmark: (symbol: string) => db.collection(COLLECTIONS.benchmarks).doc(symbol.toUpperCase()),
+  /** Daily usage counters, e.g. on-demand company loads against their budget. */
+  usage: (id: string) => db.collection(COLLECTIONS.usage).doc(id),
 }
 
 /**

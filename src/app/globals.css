@@ -35,3 +35,189 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* ------------------------------------------------------------------ *
+ * Motion
+ *
+ * One vocabulary, used everywhere:
+ *   rise     — content arriving (cards, rows, panels). 8px up + fade.
+ *   pop      — overlays appearing (search results, tooltips). Small scale.
+ *   shimmer  — skeleton placeholders while data streams in.
+ *   reveal   — view transition: skeleton leaves fast, content rises in.
+ *
+ * Exit is faster than enter: old content should get out of the way, new
+ * content should arrive gently enough to register. Everything collapses to
+ * instant under prefers-reduced-motion.
+ * ------------------------------------------------------------------ */
+
+:root {
+  --duration-exit: 150ms;
+  --duration-enter: 220ms;
+  --duration-move: 380ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --stagger: 45ms;
+  --skeleton-base: #f4f4f5; /* zinc-100 */
+  --skeleton-shine: #e4e4e7; /* zinc-200 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --skeleton-base: #18181b; /* zinc-900 */
+    --skeleton-shine: #27272a; /* zinc-800 */
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* Staggered arrival: set --i on each child (0, 1, 2…). */
+.motion-rise {
+  animation: rise var(--duration-move) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * var(--stagger));
+}
+
+.motion-pop {
+  animation: pop var(--duration-enter) var(--ease-out) both;
+  transform-origin: top center;
+}
+
+/* Value changed under the user's hand (DCF readouts): a brief settle. */
+.motion-settle {
+  animation: rise var(--duration-enter) var(--ease-out) both;
+}
+
+.skeleton {
+  border-radius: 0.375rem;
+  background: linear-gradient(
+    90deg,
+    var(--skeleton-base) 0%,
+    var(--skeleton-shine) 50%,
+    var(--skeleton-base) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+/* Lift on hover for clickable cards and rows. */
+.motion-lift {
+  transition:
+    transform var(--duration-enter) var(--ease-out),
+    box-shadow var(--duration-enter) var(--ease-out),
+    border-color var(--duration-enter) var(--ease-out);
+}
+.motion-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px -10px rgb(0 0 0 / 0.25);
+}
+
+/* Tactile press feedback on buttons. */
+.motion-press {
+  transition: transform 120ms var(--ease-out);
+}
+.motion-press:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* ── View transitions (React <ViewTransition>) ──────────────────── */
+
+/* Clicks during a transition reach the live page instead of the overlay. */
+::view-transition {
+  pointer-events: none;
+}
+
+/* The header is the spatial anchor: it never animates. */
+::view-transition-group(site-header) {
+  animation: none;
+  z-index: 100;
+}
+::view-transition-old(site-header) {
+  display: none;
+}
+::view-transition-new(site-header) {
+  animation: none;
+}
+
+/* Skeleton leaves quickly… */
+::view-transition-old(.slide-down) {
+  animation:
+    var(--duration-exit) ease-out both vt-fade reverse,
+    var(--duration-exit) ease-out both vt-slide-y reverse;
+}
+/* …then real content rises in after it. */
+::view-transition-new(.slide-up) {
+  animation:
+    var(--duration-enter) ease-in var(--duration-exit) both vt-fade,
+    var(--duration-move) var(--ease-out) both vt-slide-y;
+}
+
+/* Same place, different content (period toggles, compare symbols). */
+::view-transition-group(.crossfade) {
+  animation-duration: var(--duration-enter);
+}
+
+@keyframes vt-fade {
+  from {
+    filter: blur(3px);
+    opacity: 0;
+  }
+  to {
+    filter: blur(0);
+    opacity: 1;
+  }
+}
+@keyframes vt-slide-y {
+  from {
+    transform: translateY(10px);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  ::view-transition-old(*),
+  ::view-transition-new(*),
+  ::view-transition-group(*) {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+  }
+  .motion-lift:hover {
+    transform: none;
+  }
+}

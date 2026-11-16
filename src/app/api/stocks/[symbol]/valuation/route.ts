@@ -5,6 +5,7 @@ import { calculateDcf, marginOfSafety, reverseDcf } from '@/lib/valuation/dcf'
 import { assumptionsFor, deriveDcfInputs, describeFailure } from '@/lib/valuation/inputs'
 import { buildSensitivityGrid, gridSupportRatio } from '@/lib/valuation/sensitivity'
 import { getCurrentEntitlement } from '@/lib/queries/billing'
+import { upgradePath } from '@/lib/billing/pricing'
 
 /**
  * POST /api/stocks/AAPL/valuation
@@ -48,7 +49,7 @@ export async function POST(request: NextRequest, ctx: RouteContext<'/api/stocks/
   const entitlement = await getCurrentEntitlement()
   if (!entitlement.limits.interactiveValuation) {
     return Response.json(
-      { error: 'Custom valuation assumptions are a Pro feature.', upgrade: '/pricing' },
+      { error: 'Custom valuation assumptions are a Pro feature.', upgrade: upgradePath() },
       { status: 402 },
     )
   }

@@ -2,6 +2,8 @@ import Link from 'next/link'
 import { CheckoutButton } from '@/components/checkout-button'
 import { getCurrentUserAndEntitlement } from '@/lib/queries/billing'
 import { FREE_LIMITS, PRO_LIMITS } from '@/lib/billing/entitlements'
+import { notFound } from 'next/navigation'
+import { pricingEnabled } from '@/lib/billing/pricing'
 
 export const metadata = { title: 'Pricing | finlens' }
 
@@ -33,6 +35,9 @@ const ROWS: Array<{ label: string; free: string; pro: string }> = [
 ]
 
 export default async function PricingPage() {
+  // Hidden until NEXT_PUBLIC_PRICING_ENABLED=true — no plans page, no checkout.
+  if (!pricingEnabled()) notFound()
+
   const { userId, entitlement } = await getCurrentUserAndEntitlement()
 
   return (

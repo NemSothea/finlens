@@ -11,6 +11,7 @@ import { getCurrentUserAndEntitlement } from '@/lib/queries/billing'
 import { isWatched } from '@/lib/queries/user'
 import { getPriceSeries, getStatements, getStockSnapshot } from '@/lib/queries/stocks'
 import { deriveDcfInputs, describeFailure } from '@/lib/valuation/inputs'
+import { ensureCovered, type CoverageResult } from '@/lib/ingest/on-demand'
 import { buildFundamentalSeries } from '@/lib/fundamentals'
 import {
   formatCurrencyCompact,
@@ -21,6 +22,7 @@ import {
   formatSignedPercent,
   toneForSigned,
 } from '@/lib/format'
+import { Reveal } from '@/components/skeleton'
 
 export async function generateMetadata(
   props: PageProps<'/stocks/[symbol]'>,
@@ -28,7 +30,8 @@ export async function generateMetadata(
   const { symbol } = await props.params
   const snapshot = await getStockSnapshot(symbol)
 
-  if (!snapshot) return { title: `${symbol.toUpperCase()} — not covered | finlens` }
+  // Not loaded yet — the page loads it on this visit, so do not call it uncovered.
+  if (!snapshot) return { title: `${symbol.toUpperCase()} | finlens` }
 
   return {
     title: `${snapshot.company.symbol} — ${snapshot.company.name} | finlens`,
@@ -49,13 +52,29 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
   // Price chart history is capped at 10 years; the grid thins long series.
   const chartPriceDays = Math.min(365 * 10, limits.priceHistoryDays)
 
-  const [snapshot, statements, quarters, prices, watched] = await Promise.all([
-    getStockSnapshot(symbol),
-    getStatements(symbol, 'FY', limits.financialYears),
-    getStatements(symbol, 'Q', Math.min(40, limits.financialYears * 4)),
-    getPriceSeries(symbol, chartPriceDays),
-    userId ? isWatched(userId, symbol) : Promise.resolve(false),
-  ])
+  const read = () =>
+    Promise.all([
+      getStockSnapshot(symbol),
+      getStatements(symbol, 'FY', limits.financialYears),
+      getStatements(symbol, 'Q', Math.min(40, limits.financialYears * 4)),
+      getPriceSeries(symbol, chartPriceDays),
+      userId ? isWatched(userId, symbol) : Promise.resolve(false),
+    ])
+
+  let [snapshot, statements, quarters, prices, watched] = await read()
+
+  // Not loaded yet: fetch it now. The route's loading skeleton covers the
+  // few seconds this takes, and every later visit reads the stored copy.
+  if (!snapshot || statements.length === 0) {
+    const coverage = await ensureCovered(symbol)
+    if (coverage.status === 'ready') {
+      ;[snapshot, statements, quarters, prices, watched] = await read()
+    } else if (coverage.status === 'unknown') {
+      notFound()
+    } else {
+      return <NotLoaded symbol={symbol.toUpperCase()} coverage={coverage} />
+    }
+  }
 
   if (!snapshot) notFound()
 
@@ -79,6 +98,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
   const series = buildFundamentalSeries(statements, quarters)
 
   return (
+    <Reveal>
     <div className="space-y-12">
       {/* ── Header ─────────────────────────────────────────────── */}
       <section className="rounded-2xl border border-zinc-200 p-6 dark:border-zinc-800">
@@ -127,6 +147,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
       {/* ── Key numbers ────────────────────────────────────────── */}
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         <StatCard
+          index={0}
           title="Key margins"
           footnote={basisNote}
           rows={[
@@ -137,6 +158,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
           ]}
         />
         <StatCard
+          index={1}
           title="Key ratios"
           footnote={basisNote}
           rows={[
@@ -152,6 +174,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
           ]}
         />
         <StatCard
+          index={2}
           title="Balance sheet"
           footnote={basis.periodEnd ? `As of ${basis.periodEnd}` : undefined}
           rows={[
@@ -162,6 +185,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
           ]}
         />
         <StatCard
+          index={3}
           title="Growth"
           footnote={metrics.growthYears > 0 ? `Compound annual, ${metrics.growthYears} fiscal years` : 'Not enough annual history'}
           rows={[
@@ -172,6 +196,7 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
           ]}
         />
         <StatCard
+          index={4}
           title="Share price return"
           footnote={returns.asOf ? `Close ${returns.asOf}` : undefined}
           rows={[
@@ -341,5 +366,34 @@ export default async function StockDetailPage(props: PageProps<'/stocks/[symbol]
         </section>
       )}
     </div>
+    </Reveal>
+  )
+}
+
+/** Shown when a real ticker cannot be loaded right now — says why, and what to do. */
+function NotLoaded({
+  symbol,
+  coverage,
+}: {
+  symbol: string
+  coverage: Exclude<CoverageResult, { status: 'ready' } | { status: 'unknown' }>
+}) {
+  const message =
+    coverage.status === 'budget'
+      ? `${symbol} has not been loaded yet, and today's limit of ${coverage.limit} new companies is used up. It will load on the first visit tomorrow; companies already loaded stay available.`
+      : coverage.status === 'unlisted'
+        ? `${symbol} is not listed on a major US exchange${coverage.exchange ? ` (${coverage.exchange})` : ''}, so we do not cover it.`
+        : `${symbol} could not be loaded just now (${coverage.reason}). Try again in a minute.`
+
+  return (
+    <Reveal>
+      <div className="mx-auto max-w-lg space-y-4 py-16 text-center">
+        <h1 className="font-mono text-2xl font-semibold">{symbol}</h1>
+        <p className="text-sm text-zinc-500">{message}</p>
+        <Link href="/" className="inline-block text-sm underline underline-offset-4">
+          Back to search
+        </Link>
+      </div>
+    </Reveal>
   )
 }

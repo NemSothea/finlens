@@ -4,6 +4,7 @@ import { getOrCreateDefaultPortfolio, getPortfolioDetail, listPortfolios } from 
 import { addTransaction, deleteTransaction } from '@/app/actions/portfolio'
 import { getEntitlementForUser } from '@/lib/queries/billing'
 import { UPGRADE_MESSAGE } from '@/lib/billing/entitlements'
+import { upgradePath } from '@/lib/billing/pricing'
 
 /**
  * Portfolio for API clients.
@@ -23,7 +24,7 @@ async function failureResponse(error: string, fallbackStatus: number): Promise<R
   if (!session?.user?.id) return Response.json({ error }, { status: 401 })
 
   if (error === UPGRADE_MESSAGE) {
-    return Response.json({ error, upgrade: '/pricing' }, { status: 402 })
+    return Response.json({ error, upgrade: upgradePath() }, { status: 402 })
   }
 
   return Response.json({ error }, { status: fallbackStatus })
@@ -38,7 +39,7 @@ export async function GET(request: NextRequest) {
   const entitlement = await getEntitlementForUser(session.user.id)
   if (!entitlement.limits.portfolio) {
     return Response.json(
-      { error: 'Portfolio tracking is a Pro feature.', upgrade: '/pricing' },
+      { error: 'Portfolio tracking is a Pro feature.', upgrade: upgradePath() },
       { status: 402 },
     )
   }

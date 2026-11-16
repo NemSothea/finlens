@@ -56,7 +56,7 @@ export function WatchButton({
         onClick={onClick}
         disabled={pending}
         aria-pressed={watched}
-        className={`rounded-xl border px-3 py-1.5 text-sm transition disabled:opacity-60 ${
+        className={`motion-press rounded-xl border px-3 py-1.5 text-sm transition disabled:opacity-60 ${
           watched
             ? 'border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900'
             : 'border-zinc-300 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900'

@@ -104,7 +104,7 @@ export function ComparePicker({
             className="w-48 rounded-full border border-zinc-300 bg-transparent px-3 py-1 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
           />
           {visible.length > 0 && (
-            <ul className="absolute z-10 mt-1 w-72 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
+            <ul className="motion-pop absolute z-10 mt-1 w-72 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
               {visible.map((r) => (
                 <li key={r.symbol}>
                   <button

@@ -70,6 +70,8 @@ export interface FetchJsonOptions {
   timeoutMs?: number
   /** Called once per actual network attempt — used for vendor-call accounting. */
   onAttempt?: () => void
+  /** Extra request headers (SEC requires a declared User-Agent). */
+  headers?: Record<string, string>
 }
 
 /**
@@ -78,7 +80,7 @@ export interface FetchJsonOptions {
  * retrying it just burns quota and hides the real error.
  */
 export async function fetchJson<T = unknown>(url: string, opts: FetchJsonOptions = {}): Promise<T> {
-  const { limiter, retries = 3, timeoutMs = 20_000, onAttempt } = opts
+  const { limiter, retries = 3, timeoutMs = 20_000, onAttempt, headers } = opts
 
   let lastError: unknown
 
@@ -92,7 +94,7 @@ export async function fetchJson<T = unknown>(url: string, opts: FetchJsonOptions
     try {
       const res = await fetch(url, {
         signal: controller.signal,
-        headers: { accept: 'application/json' },
+        headers: { accept: 'application/json', ...headers },
       })
 
       if (res.ok) return (await res.json()) as T

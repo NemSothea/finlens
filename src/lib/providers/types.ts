@@ -30,6 +30,8 @@ export interface CompanyProfile {
   ipoDate: string | null
   /** Levered beta vs the market (vendor-computed, ~5y monthly). Feeds the WACC. */
   beta: number | null
+  /** SEC Central Index Key — lets the SEC history source find the filer. */
+  cik: string | null
 }
 
 /** One reporting period, all three statements merged. Nulls are expected — no

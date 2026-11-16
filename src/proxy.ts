@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { isProRoute } from '@/lib/billing/entitlements'
+import { pricingEnabled } from '@/lib/billing/pricing'
 
 /**
  * Proxy (formerly `middleware.js`, renamed in Next 16).
@@ -33,6 +34,12 @@ function hasSessionCookie(request: NextRequest): boolean {
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl
 
+  // Pricing hidden: answer with a real 404. The page's own notFound() is the
+  // backstop, but by then the root loading UI has streamed with status 200.
+  if (pathname === '/pricing' && !pricingEnabled()) {
+    return NextResponse.rewrite(new URL('/_not-found', request.url))
+  }
+
   const needsAccount = pathname === '/watchlist' || isProRoute(pathname)
   if (!needsAccount) return NextResponse.next()
 
@@ -46,8 +53,9 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Only the routes that require an account. Everything else — the landing
+  // Only the routes that require an account, plus /pricing while it is
+  // hidden. Everything else — the landing
   // page, company pages, the JSON API — stays untouched, so a proxy bug cannot
   // take down the public product.
-  matcher: ['/watchlist', '/portfolio/:path*', '/portfolio'],
+  matcher: ['/watchlist', '/portfolio/:path*', '/portfolio', '/pricing'],
 }

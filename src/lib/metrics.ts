@@ -148,7 +148,9 @@ export function trailingTwelveMonths(quartersNewestFirst: QuarterRow[]): TtmRow 
 
   for (let i = 0; i < 3; i++) {
     const gapDays = (Date.parse(q[i].periodEnd) - Date.parse(q[i + 1].periodEnd)) / DAY
-    if (!(gapDays >= 75 && gapDays <= 105)) return null
+    // 75–120 days: 13-week quarters, plus retail calendars like Costco's
+    // three 12-week quarters and a 16-week fourth (112 days).
+    if (!(gapDays >= 75 && gapDays <= 120)) return null
   }
 
   const out = { periodEnd: q[0].periodEnd } as TtmRow

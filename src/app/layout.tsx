@@ -4,6 +4,7 @@ import { Geist, Geist_Mono } from 'next/font/google'
 import { auth } from '@/auth'
 import { signOutAction } from '@/app/actions/auth'
 import './globals.css'
+import { pricingEnabled } from '@/lib/billing/pricing'
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -30,7 +31,10 @@ export default async function RootLayout({ children }: LayoutProps<'/'>) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-        <header className="border-b border-zinc-200 dark:border-zinc-800">
+        <header
+          className="border-b border-zinc-200 dark:border-zinc-800"
+          style={{ viewTransitionName: 'site-header' }}
+        >
           <nav className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
             <Link href="/" className="font-mono text-sm font-semibold tracking-tight">
               finlens
@@ -45,12 +49,14 @@ export default async function RootLayout({ children }: LayoutProps<'/'>) {
               >
                 Compare
               </Link>
-              <Link
-                href="/pricing"
-                className="transition hover:text-zinc-900 dark:hover:text-zinc-100"
-              >
-                Pricing
-              </Link>
+              {pricingEnabled() && (
+                <Link
+                  href="/pricing"
+                  className="transition hover:text-zinc-900 dark:hover:text-zinc-100"
+                >
+                  Pricing
+                </Link>
+              )}
 
               {session?.user ? (
                 <>

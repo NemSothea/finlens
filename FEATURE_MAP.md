@@ -161,3 +161,49 @@ Live check (emulator, FMP free plan, default 8% growth):
 
 The page, the API and a direct script call give the same values. AAPL reports no separate interest expense, so its cost of debt uses the fallback, and the panel says so.
 NVDA's high beta drives a 14% WACC. That is plain CAPM: low fair values here come from the 8% growth default and the beta, not from a data error.
+
+## SEC history source (2026-11-16)
+
+FMP's free plan returns only 5 periods. `src/lib/providers/sec.ts` fills older years from SEC EDGAR XBRL (`data.sec.gov` companyfacts: free, official, one request per company).
+
+- **Merge rule:** FMP rows are written first. SEC adds only the periods FMP did not return (no FMP row within 10 days). Each doc records its `source` (`fmp` or `sec`).
+- **CIK** comes from the FMP profile (`companies.cik`). SEC's ticker file blocks generic clients.
+- **Parsing rules:**
+  - The original 10-K/10-Q wins over later comparatives. Proxy statements are ignored.
+  - Fiscal years come from 10-Ks only (Amazon also files trailing-twelve-month figures in 10-Qs).
+  - Quarters are the 3-month value when filed, else year-to-date minus the previous year-to-date. Q4 = year − 9 months.
+  - Q4 shares = 4 × annual average − (Q1 + Q2 + Q3), and Q4 EPS = Q4 net income ÷ Q4 shares. This matches FMP's Q4 EPS within a cent on 8/8 checks.
+  - Stock splits are detected from restated share counts and applied to EPS and shares (NVDA, GOOGL and AMZN now match FMP).
+- **Depth now:** AAPL, MSFT and NVDA reach back to FY2007–08; META to 2010; TSLA to 2009; GOOGL to 2013 (Alphabet's own filer history). Each has 40 quarters, with no gaps across the SEC/FMP seam.
+- **Agreement with FMP on the 55 overlapping periods** (within 1%):
+  - revenue, gross profit, operating income, net income, assets, equity, operating cash flow and short-term investments: 100%
+  - diluted shares: 100%; diluted EPS: 46/47
+  - capex: 39/40
+  - EBITDA: 37/55. FMP's EBITDA definition is not documented; SEC rows use pre-tax income + interest + D&A.
+  - total debt: 26/55. FMP counts operating leases for some companies and not others; SEC rows use borrowings + leases.
+- **Known gap:** NVDA capex for FY2013–FY2021 is filed under a company-specific tag that companyfacts does not publish, so free cash flow is blank for those years rather than guessed.
+- **Config:** `SEC_USER_AGENT` (SEC asks for "app-name contact@domain"), `HISTORY_SOURCE=none` to disable, `HISTORY_YEARS` (default 30).
+
+## Whole-market search and load-on-open (2026-11-16)
+
+Search used to find only companies already in the database. Now:
+
+- **Search covers every US-listed company** (`src/lib/providers/sec-directory.ts`). It merges loaded companies with SEC's directory: the official ticker file when `SEC_USER_AGENT` contains a contact email, else EDGAR's company autocomplete. Results not yet loaded are badged "loads on open". Searching never calls FMP.
+- **Load on open** (`src/lib/ingest/on-demand.ts`). The first visit to `/stocks/X`, or adding X on the compare page, loads the company:
+  - SEC profile (name, exchange, SIC industry and a coarse sector)
+  - SEC statements
+  - FMP quote and prices
+  - computed beta and DCF
+  - Measured on a cold start: COST in 6.4 s, then 0.15 s on later visits. WMT went from search to a full page in about 8 s, with the skeleton showing meanwhile.
+- **Guard rails for load-on-open:**
+  - only tickers in SEC's directory on a listed exchange
+  - `ON_DEMAND_DAILY_LIMIT` new loads a day (default 40), counted in `usage/onDemand_<date>`
+  - concurrent visits share one load
+  - a clear page when the budget is spent or the ticker is over-the-counter
+- **SEC is now the source of all statements**, including the current fiscal year's 10-Q quarters. Its newest quarter matched FMP's for all 7 test tickers: same label and date, and every line within 1% except total debt.
+  - FMP is used only for quotes, prices, the weekly earnings date, and the CIK of companies first loaded through FMP. That is about 2 FMP calls per company a day, instead of about 10 per load.
+- **Beta is computed** from 5 years of monthly returns against SPY (`valuation/beta.ts`), the same method for every company. SPY month-end closes are cached in `benchmarks/SPY` and refreshed weekly (1 call).
+- **Retail calendars:** quarters of 75–120 days are accepted (Costco has a 16-week Q4), both in SEC parsing and in the TTM gap check.
+- **Free-plan sizing:** daily cron `limit=50` (about 100 FMP calls) plus up to 40 new loads (about 120 calls) stays under FMP's ~250 a day.
+  - Limitation: the cron refreshes the first 50 companies by ticker order, not the most-viewed ones. Past 50 loaded companies, some prices go stale until a paid FMP plan, or until the cron is ordered by popularity.
+- **Sector caveat:** the SIC-based sector is a display grouping only. For example, Alphabet and Meta fall under "computer programming", so they show as Technology.

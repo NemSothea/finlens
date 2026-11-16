@@ -6,6 +6,7 @@ import { refs, type PaymentDoc } from '@/db/schema'
 import { auth } from '@/auth'
 import { getActiveProviderName, getPaymentProvider } from '@/lib/payments/registry'
 import { PLAN_PRICES, PaymentConfigError, type PlanId } from '@/lib/payments/types'
+import { pricingEnabled } from '@/lib/billing/pricing'
 
 export type CheckoutResult =
   | { ok: true; reference: string; redirectUrl: string | null; formAction?: string; formFields?: Record<string, string> }
@@ -25,6 +26,9 @@ const planSchema = z.enum(['pro_monthly', 'pro_annual'])
  * name their own amount would name zero.
  */
 export async function startCheckout(input: unknown): Promise<CheckoutResult> {
+  // Server actions are callable without the page; the switch must hold here too.
+  if (!pricingEnabled()) return { ok: false, error: 'Subscriptions are not open yet.' }
+
   const session = await auth()
   const userId = session?.user?.id
   if (!userId) return { ok: false, error: 'Sign in to subscribe.' }

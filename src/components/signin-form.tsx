@@ -167,7 +167,7 @@ export function SignInForm({ googleEnabled, next }: { googleEnabled: boolean; ne
             type="submit"
             formAction={onSignIn}
             disabled={pending}
-            className="flex-1 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+            className="motion-press flex-1 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
           >
             {pending && mode === 'signin' ? 'Signing in…' : 'Sign in'}
           </button>
@@ -175,7 +175,7 @@ export function SignInForm({ googleEnabled, next }: { googleEnabled: boolean; ne
             type="submit"
             formAction={onRegister}
             disabled={pending}
-            className="flex-1 rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium transition disabled:opacity-50 dark:border-zinc-700"
+            className="motion-press flex-1 rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium transition disabled:opacity-50 dark:border-zinc-700"
           >
             {pending && mode === 'register' ? 'Creating…' : 'Create account'}
           </button>
@@ -187,7 +187,7 @@ export function SignInForm({ googleEnabled, next }: { googleEnabled: boolean; ne
           type="button"
           onClick={onGoogle}
           disabled={pending}
-          className="w-full rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+          className="motion-press w-full rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
         >
           {pending && mode === 'google' ? 'Opening Google…' : 'Continue with Google'}
         </button>

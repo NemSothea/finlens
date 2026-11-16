@@ -191,7 +191,9 @@ export function DcfPanel({ symbol, currency, price, inputs }: DcfPanelProps) {
           terminal value is infinite.
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        // Keyed on the method so a toggle replays the settle animation —
+        // the numbers just changed meaning, the eye should land on them.
+        <div key={`${basis}-${flavour}-${model}`} className="motion-settle grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Readout
             label="Fair value"
             value={formatPrice(computed.result.fairValuePerShare, currency)}

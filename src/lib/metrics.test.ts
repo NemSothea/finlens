@@ -42,6 +42,12 @@ function quarter(periodEnd: string, over: Partial<QuarterRow> = {}): QuarterRow 
 const FOUR = ['2026-09-30', '2026-06-30', '2026-03-31', '2025-12-31']
 
 describe('trailingTwelveMonths', () => {
+  test('accepts retail calendars with a 16-week fourth quarter', () => {
+    // Costco: three 12-week quarters and a 16-week Q4.
+    const rows = ['2025-08-31', '2025-05-11', '2025-02-16', '2024-11-24'].map((d) => quarter(d))
+    assert.notEqual(trailingTwelveMonths(rows), null)
+  })
+
   test('sums flows over four consecutive quarters and takes balances from the newest', () => {
     const rows = FOUR.map((d, i) => quarter(d, { revenue: 100 + i, totalAssets: 1000 - i }))
     const ttm = trailingTwelveMonths(rows)

@@ -17,6 +17,8 @@ import {
   formatSignedPercent,
   MISSING,
 } from '@/lib/format'
+import { Reveal } from '@/components/skeleton'
+import { ensureCovered } from '@/lib/ingest/on-demand'
 
 export const metadata = {
   title: 'Compare companies | finlens',
@@ -87,7 +89,14 @@ export default async function ComparePage(props: PageProps<'/compare'>) {
   const allowed = requested.slice(0, limits.compareSymbols)
   const overflow = requested.slice(limits.compareSymbols)
 
-  const snapshots = allowed.length >= 2 ? await getSnapshots(allowed) : []
+  let snapshots = allowed.length >= 2 ? await getSnapshots(allowed) : []
+  // Symbols picked from SEC's directory are not loaded yet: load them now
+  // (same budget-capped path as the stock page), then read again.
+  const unloaded = allowed.length >= 2 ? allowed.filter((s) => !snapshots.some((x) => x.company.symbol === s)) : []
+  if (unloaded.length > 0) {
+    const results = await Promise.all(unloaded.map((s) => ensureCovered(s)))
+    if (results.some((r) => r.status === 'ready')) snapshots = await getSnapshots(allowed)
+  }
   const found = new Set(snapshots.map((s) => s.company.symbol))
   // Only meaningful once a lookup ran — with one symbol nothing was fetched.
   const missing = allowed.length >= 2 ? allowed.filter((s) => !found.has(s)) : []
@@ -119,6 +128,7 @@ export default async function ComparePage(props: PageProps<'/compare'>) {
   const wins = snapshots.map((_, i) => winners.filter((w) => w === i).length)
 
   return (
+    <Reveal>
     <div className="space-y-8">
       <SectionHeading
         title="Compare companies"
@@ -137,7 +147,7 @@ export default async function ComparePage(props: PageProps<'/compare'>) {
         // Partial results beat an error page — the user still gets the
         // comparison they can have, and knows exactly what is absent.
         <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-          Not in our universe: <span className="font-mono">{missing.join(', ')}</span>
+          Could not load: <span className="font-mono">{missing.join(', ')}</span>
         </div>
       )}
 
@@ -244,5 +254,6 @@ export default async function ComparePage(props: PageProps<'/compare'>) {
         </>
       )}
     </div>
+    </Reveal>
   )
 }

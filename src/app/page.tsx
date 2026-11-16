@@ -8,6 +8,7 @@ import {
   toneForSigned,
   MISSING,
 } from '@/lib/format'
+import { Reveal } from '@/components/skeleton'
 
 /**
  * ISR, not static. This page reads the DB, and the ingest pipeline runs
@@ -22,6 +23,7 @@ export default async function HomePage() {
   const covered = await getCoveredCompanies(30)
 
   return (
+    <Reveal>
     <div className="space-y-12">
       <section className="space-y-6">
         <div className="max-w-2xl space-y-3">
@@ -71,10 +73,11 @@ export default async function HomePage() {
                 </tr>
               </thead>
               <tbody>
-                {covered.map((c) => (
+                {covered.map((c, i) => (
                   <tr
                     key={c.symbol}
-                    className="border-b border-zinc-100 last:border-0 hover:bg-zinc-50 dark:border-zinc-900 dark:hover:bg-zinc-900/60"
+                    style={{ '--i': Math.min(i, 12) } as React.CSSProperties}
+                    className="motion-rise border-b border-zinc-100 last:border-0 hover:bg-zinc-50 dark:border-zinc-900 dark:hover:bg-zinc-900/60"
                   >
                     <td className="px-4 py-3">
                       <Link
@@ -114,10 +117,11 @@ export default async function HomePage() {
         )}
 
         <p className="mt-3 text-xs text-zinc-400">
-          Fair values use default assumptions (8% growth fading to 2.5%, 10% discount rate).
-          Tune them per company on the detail page.
+          Fair values use default assumptions: trailing-twelve-month cash flow to the firm, 8%
+          growth fading to 2.5%, discounted at each company&apos;s WACC. Tune them on the detail page.
         </p>
       </section>
     </div>
+    </Reveal>
   )
 }

@@ -13,6 +13,7 @@ import {
   type PriceReturns,
   type QuarterRow,
 } from '@/lib/metrics'
+import { searchDirectory } from '@/lib/providers/sec-directory'
 
 /**
  * The single read layer.
@@ -32,6 +33,9 @@ export interface SearchResult {
   sector: string | null
   price: number | null
   marketCap: number | null
+  /** False for companies found in SEC's directory but not loaded yet — the
+   *  first visit loads them. */
+  covered: boolean
 }
 
 /** How many keyword matches to rank in memory. Firestore cannot sort by a
@@ -73,7 +77,38 @@ export async function searchCompanies(query: string, limit = 20): Promise<Search
       sector: c.sector ?? null,
       price: c.quote?.price ?? null,
       marketCap: c.quote?.marketCap ?? null,
+      covered: true,
     }))
+}
+
+/**
+ * Loaded companies first, then any other US-listed company from SEC's
+ * directory, so search reaches the whole market rather than what happens to be
+ * in the database. A directory failure degrades to loaded-only results.
+ */
+export async function searchEverything(query: string, limit = 8): Promise<SearchResult[]> {
+  const cap = Math.min(Math.max(limit, 1), 50)
+  const [loaded, directory] = await Promise.all([
+    searchCompanies(query, cap),
+    searchDirectory(query, cap).catch(() => []),
+  ])
+  const seen = new Set(loaded.map((r) => r.symbol))
+  const extra = directory
+    .filter((d) => !seen.has(d.symbol))
+    .map((d) => ({
+      symbol: d.symbol,
+      name: d.name,
+      exchange: d.exchange,
+      sector: null,
+      price: null,
+      marketCap: null,
+      covered: false,
+    }))
+  // An exact ticker match outranks everything, loaded or not.
+  const all = [...loaded, ...extra]
+  const exact = all.findIndex((r) => r.symbol === query.trim().toUpperCase())
+  if (exact > 0) all.unshift(...all.splice(exact, 1))
+  return all.slice(0, cap)
 }
 
 export interface StatementRow {

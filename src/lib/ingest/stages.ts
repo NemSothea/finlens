@@ -9,11 +9,15 @@ import {
   type ValuationDoc,
 } from '@/db/schema'
 import { mapWithConcurrency } from '@/lib/providers/http'
-import type { MarketDataProvider } from '@/lib/providers/types'
+import type { FinancialPeriod, MarketDataProvider } from '@/lib/providers/types'
 import { chunk, type RunContext } from './runner'
 import { calculateDcf, marginOfSafety, reverseDcf } from '@/lib/valuation/dcf'
 import { deriveDcfInputs, describeFailure } from '@/lib/valuation/inputs'
 import { toStatementRow } from '@/lib/queries/stocks'
+import { olderHistory, SecHistorySource } from '@/lib/providers/sec'
+import { getSecProfile } from '@/lib/providers/sec-directory'
+import { betaFromCloses } from '@/lib/valuation/beta'
+import { getPriceSeries } from '@/lib/queries/stocks'
 
 export interface StageOptions {
   provider: MarketDataProvider
@@ -24,6 +28,8 @@ export interface StageOptions {
   /** Quarterly periods to fetch alongside annual ones (feeds TTM). 0 = skip. */
   quarters?: number
   concurrency?: number
+  /** Fills statement periods older than the primary vendor returns. */
+  history?: SecHistorySource | null
 }
 
 /** A Firestore batch holds 500 writes; stay under it with headroom. */
@@ -113,11 +119,23 @@ export async function stageProfiles(opts: StageOptions) {
 
   await mapWithConcurrency(symbols, opts.concurrency ?? 4, async (symbol) => {
     try {
-      const p = await provider.getProfile(symbol)
+      // SEC first when we know the filer: free, and it leaves the vendor's
+      // daily quota for prices. The vendor profile is the fallback, and the
+      // way a company's CIK is learned in the first place.
+      const known = (await refs.company(symbol).get()).data() as CompanyDoc | undefined
+      const useSec = Boolean(opts.history && known?.cik && process.env.PROFILE_SOURCE !== 'fmp')
+      const p = useSec
+        ? await getSecProfile(symbol, known!.cik!).catch(() => null)
+        : await provider.getProfile(symbol)
       if (!p) {
         ctx.recordFailure(symbol, 'no profile returned')
         return
       }
+      // SEC has no description, CEO, headcount or beta: never blank out what
+      // an earlier vendor profile filled in.
+      const fields = Object.fromEntries(
+        Object.entries(p).filter(([, v]) => v != null || !useSec),
+      ) as Partial<typeof p>
       // A missing earnings date must not fail the profile — it is a nice-to-have.
       const nextEarningsDate = await provider
         .getNextEarningsDate(symbol, new Date().toISOString().slice(0, 10))
@@ -125,8 +143,10 @@ export async function stageProfiles(opts: StageOptions) {
 
       await refs.company(symbol).set(
         {
-          ...p,
+          ...fields,
           symbol: p.symbol.toUpperCase(),
+          profileSource: useSec ? 'sec' : provider.name,
+          ...(!useSec && p.beta != null ? { betaSource: 'vendor' as const } : {}),
           nextEarningsDate,
           isActive: true,
           keywords: buildKeywords(p.symbol, p.name),
@@ -155,16 +175,54 @@ export async function stageFinancials(opts: StageOptions) {
   // Four quarters make one TTM; eight leave room for a missing filing and a
   // year-over-year TTM comparison. The FMP free plan caps this at 5.
   const quarters = opts.quarters ?? Number(process.env.INGEST_QUARTERS ?? 8)
+  // How far back SEC history reaches (XBRL starts ~2009, so ~15 years in practice).
+  const historyYears = Number(process.env.HISTORY_YEARS ?? 30)
 
   await mapWithConcurrency(symbols, opts.concurrency ?? 3, async (symbol) => {
     try {
+      // SEC filings as the whole statement history when the filer is known:
+      // free, official, as fresh as the vendor (the newest 10-Q lands the same
+      // day), and one consistent set of definitions across every year.
+      const cik = ((await refs.company(symbol).get()).data() as CompanyDoc | undefined)?.cik
+      if (opts.history && cik && process.env.FINANCIALS_SOURCE !== 'fmp') {
+        const sec = await opts.history.getHistory(symbol, cik).catch((error: Error) => {
+          console.warn(`[financials] ${symbol}: SEC unavailable, using ${provider.name} — ${error.message}`)
+          return null
+        })
+        if (sec && sec.annual.length > 0) {
+          const rows = [...sec.annual.slice(0, historyYears), ...sec.quarterly.slice(0, historyYears * 4)]
+          await replaceStatements(symbol, rows, opts.history.name)
+          ctx.recordOk(rows.length)
+          return
+        }
+      }
+
       const annual = await provider.getAnnualFinancials(symbol, years)
       if (annual.length === 0) {
         ctx.recordFailure(symbol, 'no annual statements returned')
         return
       }
       const quarterly = quarters > 0 ? await provider.getQuarterlyFinancials(symbol, quarters) : []
-      const periods = [...annual, ...quarterly]
+      const periods = [...annual, ...quarterly].map((f) => ({ ...f, source: provider.name }))
+
+      // Older periods from SEC filings. Best effort: a history failure must
+      // not lose the vendor rows already fetched.
+      if (opts.history) {
+        const cik = ((await refs.company(symbol).get()).data() as CompanyDoc | undefined)?.cik
+        if (cik) {
+          try {
+            const sec = await opts.history.getHistory(symbol, cik)
+            for (const f of [
+              ...olderHistory(annual, sec.annual, historyYears),
+              ...olderHistory(quarterly, sec.quarterly, historyYears * 4),
+            ]) {
+              periods.push({ ...f, source: opts.history.name })
+            }
+          } catch (error) {
+            console.warn(`[financials] ${symbol}: SEC history skipped — ${(error as Error).message}`)
+          }
+        }
+      }
 
       for (const batch of chunk(periods, BATCH_SIZE)) {
         const writes = db.batch()
@@ -176,7 +234,6 @@ export async function stageFinancials(opts: StageOptions) {
             ...f,
             symbol: f.symbol.toUpperCase(),
             isAnnual: f.period === 'FY',
-            source: provider.name,
             ingestedAt: new Date(),
           }
           writes.set(refs.financial(symbol, f.period, f.periodEnd), doc)
@@ -190,6 +247,34 @@ export async function stageFinancials(opts: StageOptions) {
   })
 
   return { symbols: symbols.length }
+}
+
+/**
+ * Write a full statement set and delete the symbol's other statement docs, so
+ * a switch of source never leaves two rows for one period (a vendor dating a
+ * 52/53-week quarter a day apart would otherwise break the TTM gap check).
+ */
+async function replaceStatements(symbol: string, rows: FinancialPeriod[], source: string) {
+  const keep = new Set(rows.map((f) => refs.financial(symbol, f.period, f.periodEnd).path))
+  const stale = (await refs.financials(symbol).select().get()).docs.filter((d) => !keep.has(d.ref.path))
+
+  const ops: Array<(b: FirebaseFirestore.WriteBatch) => void> = [
+    ...rows.map((f) => (b: FirebaseFirestore.WriteBatch) =>
+      b.set(refs.financial(symbol, f.period, f.periodEnd), {
+        ...f,
+        symbol: f.symbol.toUpperCase(),
+        isAnnual: f.period === 'FY',
+        source,
+        ingestedAt: new Date(),
+      } satisfies FinancialStatementDoc),
+    ),
+    ...stale.map((d) => (b: FirebaseFirestore.WriteBatch) => b.delete(d.ref)),
+  ]
+  for (const group of chunk(ops, BATCH_SIZE)) {
+    const batch = db.batch()
+    for (const op of group) op(batch)
+    await batch.commit()
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -242,6 +327,7 @@ export async function stagePrices(opts: StageOptions) {
   const { provider, ctx } = opts
   const symbols = await resolveSymbols(opts)
   const lookbackDays = Number(process.env.INGEST_PRICE_LOOKBACK_DAYS ?? 7)
+  let benchmark: Promise<Map<string, number> | null> | undefined
 
   await mapWithConcurrency(symbols, opts.concurrency ?? 4, async (symbol) => {
     try {
@@ -292,6 +378,15 @@ export async function stagePrices(opts: StageOptions) {
       writes.set(companyRef, { lastPriceDate: newest }, { merge: true })
       await writes.commit()
 
+      // Beta from our own prices: one method for every company, no vendor
+      // dependency. Best effort — a missing benchmark must not fail prices.
+      const market = await (benchmark ??= loadBenchmark(provider))
+      if (market) {
+        const closes = (await getPriceSeries(symbol, 365 * 6)).map((b) => ({ date: b.tradeDate, close: b.close }))
+        const beta = betaFromCloses(closes, market)
+        if (beta != null) await companyRef.set({ beta, betaSource: 'computed' }, { merge: true })
+      }
+
       ctx.recordOk(bars.length)
     } catch (error) {
       ctx.recordFailure(symbol, error)
@@ -299,6 +394,34 @@ export async function stagePrices(opts: StageOptions) {
   })
 
   return { symbols: symbols.length }
+}
+
+/** The market for beta: SPY month-end closes. */
+export const BENCHMARK = 'SPY'
+
+/**
+ * SPY month-end closes, refreshed from the vendor at most weekly (one call)
+ * and shared by every company's beta.
+ */
+async function loadBenchmark(provider: MarketDataProvider): Promise<Map<string, number> | null> {
+  const ref = refs.benchmark(BENCHMARK)
+  const doc = (await ref.get()).data() as { monthly?: Record<string, number>; updatedAt?: { toDate(): Date } } | undefined
+  const age = doc?.updatedAt ? Date.now() - doc.updatedAt.toDate().getTime() : Infinity
+  if (doc?.monthly && age < 7 * 86_400_000) return new Map(Object.entries(doc.monthly))
+
+  try {
+    const bars = await provider.getDailyPrices(BENCHMARK, isoDaysBefore(todayIso(), 365 * 6))
+    const monthly: Record<string, number> = {}
+    for (const b of [...bars].sort((x, y) => (x.tradeDate < y.tradeDate ? -1 : 1))) {
+      if (b.close > 0) monthly[b.tradeDate.slice(0, 7)] = b.close
+    }
+    if (Object.keys(monthly).length === 0) return null
+    await ref.set({ symbol: BENCHMARK, monthly, updatedAt: new Date() })
+    return new Map(Object.entries(monthly))
+  } catch (error) {
+    console.warn(`[prices] benchmark ${BENCHMARK} unavailable — ${(error as Error).message}`)
+    return doc?.monthly ? new Map(Object.entries(doc.monthly)) : null
+  }
 }
 
 /* ------------------------------------------------------------------ *

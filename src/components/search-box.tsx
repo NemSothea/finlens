@@ -11,6 +11,7 @@ interface Result {
   sector: string | null
   price: number | null
   marketCap: number | null
+  covered: boolean
 }
 
 /**
@@ -117,11 +118,14 @@ export function SearchBox({ autoFocus = false }: { autoFocus?: boolean }) {
       />
 
       {busy && (
-        <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-zinc-400">…</span>
+        <span
+          aria-label="Searching"
+          className="absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-900 dark:border-zinc-700 dark:border-t-zinc-100"
+        />
       )}
 
       {open && visible.length > 0 && (
-        <ul className="absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+        <ul className="motion-pop absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
           {visible.map((r, i) => (
             <li key={r.symbol}>
               <button
@@ -136,10 +140,19 @@ export function SearchBox({ autoFocus = false }: { autoFocus?: boolean }) {
                   <span className="font-mono text-sm font-semibold">{r.symbol}</span>
                   <span className="ml-2 truncate text-sm text-zinc-500">{r.name}</span>
                 </span>
-                <span className="shrink-0 text-right text-xs text-zinc-500">
-                  <span className="block">{formatPrice(r.price)}</span>
-                  <span className="block">{formatCurrencyCompact(r.marketCap)}</span>
-                </span>
+                {r.covered ? (
+                  <span className="shrink-0 text-right text-xs text-zinc-500">
+                    <span className="block">{formatPrice(r.price)}</span>
+                    <span className="block">{formatCurrencyCompact(r.marketCap)}</span>
+                  </span>
+                ) : (
+                  <span
+                    className="shrink-0 rounded-full border border-zinc-200 px-2 py-0.5 text-[11px] text-zinc-500 dark:border-zinc-700"
+                    title="Not loaded yet — opening it fetches its filings and prices, which takes a few seconds."
+                  >
+                    loads on open
+                  </span>
+                )}
               </button>
             </li>
           ))}
@@ -147,8 +160,8 @@ export function SearchBox({ autoFocus = false }: { autoFocus?: boolean }) {
       )}
 
       {open && !busy && trimmed.length > 0 && visible.length === 0 && (
-        <div className="absolute z-20 mt-2 w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-500 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-          No match for “{trimmed}”. Only companies in our ingested universe are searchable.
+        <div className="motion-pop absolute z-20 mt-2 w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-500 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+          No US-listed company matches “{trimmed}”. Try the ticker, or the start of the name.
         </div>
       )}
     </div>

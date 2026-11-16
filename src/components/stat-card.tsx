@@ -18,13 +18,19 @@ export function StatCard({
   title,
   rows,
   footnote,
+  index = 0,
 }: {
   title: string
   rows: StatRow[]
   footnote?: string
+  /** Position in its row; staggers the entrance animation. */
+  index?: number
 }) {
   return (
-    <section className="flex flex-col rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
+    <section
+      className="motion-rise flex flex-col rounded-xl border border-zinc-200 p-4 dark:border-zinc-800"
+      style={{ '--i': index } as React.CSSProperties}
+    >
       <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">{title}</h3>
       <dl className="mt-3 flex-1 space-y-2">
         {rows.map((r) => (

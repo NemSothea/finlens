@@ -1,6 +1,7 @@
 'use client'
 
 import { useMemo, useState, type ReactNode } from 'react'
+import { CHART_ANIMATION_MS, useReducedMotion } from '@/lib/use-reduced-motion'
 import {
   Area,
   AreaChart,
@@ -103,6 +104,7 @@ export function FundamentalsGrid({
   /** Shown under the price tile, e.g. a plan limit on history depth. */
   priceNote?: string
 }) {
+  const animate = !useReducedMotion()
   const [mode, setMode] = useState<PeriodMode>(
     series.ttm.length >= 2 ? 'ttm' : series.annual.length > 0 ? 'annual' : 'quarterly',
   )
@@ -180,7 +182,7 @@ export function FundamentalsGrid({
                   stroke={priceChange != null && priceChange < 0 ? LOSS : UP}
                   strokeWidth={2}
                   fill="url(#tilePriceFill)"
-                  isAnimationActive={false}
+                  isAnimationActive={animate} animationDuration={CHART_ANIMATION_MS} animationEasing="ease-out"
                 />
               </AreaChart>
             </ResponsiveContainer>
@@ -218,7 +220,7 @@ export function FundamentalsGrid({
                       formatter={(v: unknown) => [format(t.kind, toNumber(v), currency), t.title]}
                       {...TOOLTIP_PROPS}
                     />
-                    <Bar dataKey={t.key} radius={[4, 4, 0, 0]} isAnimationActive={false}>
+                    <Bar dataKey={t.key} radius={[4, 4, 0, 0]} isAnimationActive={animate} animationDuration={CHART_ANIMATION_MS} animationEasing="ease-out">
                       {points.map((p) => (
                         <Cell key={p.label} fill={(p[t.key] ?? 0) < 0 ? LOSS : BAR} />
                       ))}
@@ -258,7 +260,7 @@ function Tile({
 }) {
   return (
     <div
-      className={`rounded-xl border border-zinc-200 p-3 dark:border-zinc-800 ${
+      className={`motion-lift rounded-xl border border-zinc-200 p-3 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700 ${
         expanded ? 'sm:col-span-2 lg:col-span-4' : ''
       }`}
     >
@@ -319,7 +321,7 @@ export function Segmented({
           disabled={o.disabled}
           aria-pressed={value === o.key}
           onClick={() => onChange(o.key)}
-          className={`rounded-full px-3 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+          className={`motion-press rounded-full px-3 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
             value === o.key
               ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
               : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'

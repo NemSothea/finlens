@@ -1,6 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
+import { CHART_ANIMATION_MS, useReducedMotion } from '@/lib/use-reduced-motion'
 import {
   Bar,
   BarChart,
@@ -59,6 +60,7 @@ const RANGES: Array<{ label: string; years: number | null }> = [
 const color = (i: number) => `var(--series-${(i % 4) + 1})`
 
 export function CompareCharts({ companies, currency }: { companies: CompareCompany[]; currency: string }) {
+  const animate = !useReducedMotion()
   const hasTtm = companies.every((c) => c.series.ttm.length >= 2)
   const [mode, setMode] = useState<PeriodMode>(hasTtm ? 'ttm' : 'annual')
   const [years, setYears] = useState<number | null>(5)
@@ -161,7 +163,7 @@ export function CompareCharts({ companies, currency }: { companies: CompareCompa
                         stroke={color(i)}
                         strokeWidth={2}
                         dot={false}
-                        isAnimationActive={false}
+                        isAnimationActive={animate} animationDuration={CHART_ANIMATION_MS} animationEasing="ease-out"
                       />
                     ))}
                   </LineChart>
@@ -192,6 +194,7 @@ function MetricBars({
   kind: 'index' | 'currency' | 'perShare' | 'percent'
   currency: string
 }) {
+  const animate = !useReducedMotion()
   const rows = useMemo(
     () =>
       alignByCalendar(
@@ -226,7 +229,7 @@ function MetricBars({
         />
         <Legend wrapperStyle={{ fontSize: 12 }} />
         {companies.map((co, i) => (
-          <Bar key={co.symbol} dataKey={co.symbol} fill={color(i)} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+          <Bar key={co.symbol} dataKey={co.symbol} fill={color(i)} radius={[4, 4, 0, 0]} isAnimationActive={animate} animationDuration={CHART_ANIMATION_MS} animationEasing="ease-out" />
         ))}
       </BarChart>
     </ResponsiveContainer>

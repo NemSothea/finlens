@@ -53,7 +53,7 @@ export function TransactionForm({ portfolioId }: { portfolioId: string }) {
             key={k}
             type="button"
             onClick={() => setKind(k)}
-            className={`rounded-lg border px-3 py-1.5 text-sm capitalize transition ${
+            className={`motion-press rounded-lg border px-3 py-1.5 text-sm capitalize transition ${
               kind === k
                 ? 'border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900'
                 : 'border-zinc-300 dark:border-zinc-700'
@@ -96,7 +96,7 @@ export function TransactionForm({ portfolioId }: { portfolioId: string }) {
       <button
         type="submit"
         disabled={pending}
-        className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+        className="motion-press rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
       >
         {pending ? 'Saving…' : `Record ${kind}`}
       </button>
