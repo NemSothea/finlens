@@ -26,7 +26,8 @@ npm run ingest -- --stage=all --provider=fixture
 npm run dev:user -- --email=dev@finlens.test --password=devpassword123 --admin
 
 # 5. Checks
-npm test          # 187 unit tests
+npm test          # unit tests
+npm run smoke     # end-to-end checks against the running app (see Smoke test)
 npm run typecheck
 ```
 
@@ -49,19 +50,44 @@ npm run dev -- -p 3001
 
 ## Real data
 
-Get an [FMP](https://site.financialmodelingprep.com/developer/docs) key, put it in
-`.env.local` as `FMP_API_KEY`, then drop `--provider=fixture`:
+Two sources, each doing what it is free or good at:
+
+- **SEC EDGAR** (free, no key): every statement — annual and quarterly, including the
+  current year's 10-Q quarters, about 15 years deep — plus company profiles and the
+  directory of US-listed companies that search runs on. Set `SEC_USER_AGENT` to
+  `"app-name you@your-domain"`; SEC asks automated clients to identify themselves.
+- **FMP** (`FMP_API_KEY`): quotes, daily prices and earnings dates only. The free plan
+  allows about 250 calls a day, at most 5 periods per request, and blocks some tickers
+  (HTTP 402); those pages show fundamentals with a "price not available" note.
+
+Companies do not need to be ingested in advance: opening `/stocks/X` for any US-listed
+ticker loads it (about 3 FMP calls), capped at `ON_DEMAND_DAILY_LIMIT` new companies a
+day. To seed a few up front:
 
 ```bash
-npm run ingest -- --stage=universe --limit=200
-npm run ingest -- --stage=profiles
-npm run ingest -- --stage=financials --years=30
-npm run ingest -- --stage=quotes
-npm run ingest -- --stage=valuations
+npm run ingest -- --stage=all --symbols=AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA --years=5 --quarters=5
 ```
 
-Swapping vendor = implement `MarketDataProvider` (`src/lib/providers/types.ts`) and
-register it in `src/lib/ingest/pipeline.ts`. Nothing else changes.
+`--years`/`--quarters` only limit FMP (free plan max 5); SEC history depth is
+`HISTORY_YEARS`. Beta is computed from five years of monthly returns against SPY.
+Swapping the price vendor = implement `MarketDataProvider`
+(`src/lib/providers/types.ts`) and register it in `src/lib/ingest/pipeline.ts`.
+
+## Smoke test
+
+With the emulators and the app running and AAPL, MSFT and NVDA loaded:
+
+```bash
+npm run smoke                                  # against http://localhost:3001
+npm run smoke -- --base=http://localhost:3000
+```
+
+About 50 checks over real HTTP, as a signed-out visitor, a free user, a Pro user and
+an admin: every page (status codes, 404s, redirects, key content), every API, the
+plan gates, watchlist and portfolio round trips, and the cron and webhook guards.
+It creates its own `smoke-*@finlens.test` accounts with a random password each run,
+cleans up what it adds, makes no FMP calls, and refuses to run unless the target is
+localhost with the Firebase emulators configured. Exit code 1 on any failure.
 
 ## Ops
 

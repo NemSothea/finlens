@@ -15,7 +15,8 @@
     "dev:user": "tsx scripts/dev/create-user.ts",
     "dev:pro": "tsx scripts/dev/set-plan.ts",
     "dev:webhook": "tsx scripts/dev/send-webhook.ts",
-    "dev:checkout": "tsx scripts/dev/start-checkout.ts"
+    "dev:checkout": "tsx scripts/dev/start-checkout.ts",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "firebase": "^12.19.0",
